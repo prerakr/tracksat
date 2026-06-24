@@ -10,6 +10,8 @@ import { FilterBar } from './components/FilterBar'
 import { useSatellites } from './hooks/useSatellites'
 import { useLivePositions } from './hooks/useLivePositions'
 import { useUserLocation } from './hooks/useUserLocation'
+import { useWebXR } from './hooks/useWebXR'
+import { XRButton } from './components/XRButton'
 import { computeGroundTrack } from './lib/groundTrack'
 import { ALL_CATEGORIES } from './lib/categories'
 import type { SatelliteRecord, SatPosition, ArcSegment, SatCategory } from './types/satellite'
@@ -18,7 +20,18 @@ export default function App() {
   const { satellites, loading, error, lastFetch } = useSatellites()
   const positions = useLivePositions(satellites)
   const { location: userLocation } = useUserLocation()
+  const { isSupported: xrSupported, isPresenting: xrPresenting, enter: enterXR, exit: exitXR } = useWebXR()
   const globeViewRef = useRef<GlobeViewHandle>(null)
+
+  const handleEnterXR = useCallback(async () => {
+    const session = await enterXR()
+    if (session) await globeViewRef.current?.enterXR(session)
+  }, [enterXR])
+
+  const handleExitXR = useCallback(() => {
+    globeViewRef.current?.exitXR()
+    exitXR()
+  }, [exitXR])
 
   const [selectedSat, setSelectedSat] = useState<(SatelliteRecord & SatPosition) | null>(null)
   const [groundTrack, setGroundTrack] = useState<ArcSegment[]>([])
@@ -101,6 +114,13 @@ export default function App() {
       </div>
 
       <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
+
+      <XRButton
+        isSupported={xrSupported}
+        isPresenting={xrPresenting}
+        onEnter={handleEnterXR}
+        onExit={handleExitXR}
+      />
 
       {userLocation && (
         <button
