@@ -20,15 +20,14 @@ interface Props {
   onSelectSat: (sat: SatelliteRecord & SatPosition) => void
 }
 
-// Log scale so LEO (~400 km) and GEO (~36 000 km) are both legible.
-// 0 = surface, ~0.05 = ISS, ~0.6 = GPS, ~0.8 = GEO.
+// Log scale: 0 = surface, ~0.05 = ISS, ~0.6 = GPS, ~0.8 = GEO
 function altToVisual(altKm: number): number {
   if (altKm <= 0) return 0
   const clamped = Math.min(altKm, 42_164)
   return Math.log(clamped / 150 + 1) / Math.log(42_164 / 150 + 1) * 0.8
 }
 
-// One geometry shared by all dots; one material per colour (7 total).
+// Shared geometry + per-colour material cache — avoids re-allocating for 5000+ dots
 const _satGeo = new THREE.SphereGeometry(0.5, 5, 4)
 const _matCache = new Map<string, THREE.MeshBasicMaterial>()
 function getMat(color: string): THREE.MeshBasicMaterial {
@@ -37,8 +36,17 @@ function getMat(color: string): THREE.MeshBasicMaterial {
   return m
 }
 
+const _orbitMat = new THREE.LineDashedMaterial({
+  color: '#14b8a6',
+  dashSize: 3,
+  gapSize: 1.5,
+  opacity: 0.85,
+  transparent: true,
+})
+
 export function GlobeView({ satellites, positions, activeCategories, groundTrack, onSelectSat }: Props) {
   const globeRef = useRef<GlobeMethods | undefined>(undefined)
+  const orbitLineRef = useRef<THREE.Line | null>(null)
 
   useEffect(() => {
     if (!globeRef.current) return
@@ -51,6 +59,44 @@ export function GlobeView({ satellites, positions, activeCategories, groundTrack
     controls.autoRotateSpeed = 0.3
     controls.addEventListener('start', () => { controls.autoRotate = false })
   }, [])
+
+  // Orbit line rendered as a single THREE.Line — 1 draw call, no per-frame animation
+  useEffect(() => {
+    const globe = globeRef.current
+    if (!globe) return
+    const scene = globe.scene()
+
+    // Dispose previous line
+    if (orbitLineRef.current) {
+      scene.remove(orbitLineRef.current)
+      orbitLineRef.current.geometry.dispose()
+      orbitLineRef.current = null
+    }
+
+    if (groundTrack.length === 0) return
+
+    const pts: THREE.Vector3[] = []
+    for (let i = 0; i < groundTrack.length; i++) {
+      const seg = groundTrack[i]
+      if (i === 0) {
+        const c = globe.getCoords(seg.startLat, seg.startLng, altToVisual(seg.altKm))
+        pts.push(new THREE.Vector3(c.x, c.y, c.z))
+      }
+      const c = globe.getCoords(seg.endLat, seg.endLng, altToVisual(seg.altKm))
+      pts.push(new THREE.Vector3(c.x, c.y, c.z))
+    }
+
+    const geo = new THREE.BufferGeometry().setFromPoints(pts)
+    const line = new THREE.Line(geo, _orbitMat)
+    line.computeLineDistances()
+    scene.add(line)
+    orbitLineRef.current = line
+
+    return () => {
+      scene.remove(line)
+      geo.dispose()
+    }
+  }, [groundTrack])
 
   const pointsData = useMemo<PointDatum[]>(() => {
     const result: PointDatum[] = []
@@ -96,19 +142,6 @@ export function GlobeView({ satellites, positions, activeCategories, groundTrack
         </div>`
       }}
       onCustomLayerClick={(obj: object) => handleCustomClick(obj)}
-      arcsData={groundTrack}
-      arcStartLat="startLat"
-      arcStartLng="startLng"
-      arcEndLat="endLat"
-      arcEndLng="endLng"
-      arcStartAltitude={(d: object) => altToVisual((d as ArcSegment).altKm)}
-      arcEndAltitude={(d: object) => altToVisual((d as ArcSegment).altKm)}
-      arcAltitude={(d: object) => altToVisual((d as ArcSegment).altKm)}
-      arcColor={() => '#14b8a6'}
-      arcStroke={0.5}
-      arcDashLength={0.4}
-      arcDashGap={0.2}
-      arcDashAnimateTime={3000}
       width={window.innerWidth}
       height={window.innerHeight}
     />
