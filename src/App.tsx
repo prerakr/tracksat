@@ -1,11 +1,14 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { LocateFixed } from 'lucide-react'
 import { GlobeView } from './components/GlobeView'
+import type { GlobeViewHandle } from './components/GlobeView'
 import { InfoPanel } from './components/InfoPanel'
 import { StatsBar } from './components/StatsBar'
 import { SearchBar } from './components/SearchBar'
 import { FilterBar } from './components/FilterBar'
 import { useSatellites } from './hooks/useSatellites'
 import { useLivePositions } from './hooks/useLivePositions'
+import { useUserLocation } from './hooks/useUserLocation'
 import { computeGroundTrack } from './lib/groundTrack'
 import { ALL_CATEGORIES } from './lib/categories'
 import type { SatelliteRecord, SatPosition, ArcSegment, SatCategory } from './types/satellite'
@@ -13,6 +16,8 @@ import type { SatelliteRecord, SatPosition, ArcSegment, SatCategory } from './ty
 export default function App() {
   const { satellites, loading, error, lastFetch } = useSatellites()
   const positions = useLivePositions(satellites)
+  const { location: userLocation } = useUserLocation()
+  const globeViewRef = useRef<GlobeViewHandle>(null)
 
   const [selectedSat, setSelectedSat] = useState<(SatelliteRecord & SatPosition) | null>(null)
   const [groundTrack, setGroundTrack] = useState<ArcSegment[]>([])
@@ -73,13 +78,25 @@ export default function App() {
 
       <div className="absolute inset-0 pt-20">
         <GlobeView
+          ref={globeViewRef}
           satellites={satellites}
           positions={positions}
           activeCategories={activeCategories}
           groundTrack={groundTrack}
+          userLocation={userLocation}
           onSelectSat={handleSelectSat}
         />
       </div>
+
+      {userLocation && (
+        <button
+          onClick={() => globeViewRef.current?.flyTo(userLocation.lat, userLocation.lng)}
+          title="Center on my location"
+          className="absolute bottom-6 right-6 z-20 flex items-center justify-center w-10 h-10 rounded-full bg-slate-800/90 border border-slate-600 text-blue-400 hover:bg-slate-700 hover:border-blue-500 hover:text-blue-300 transition-colors shadow-lg backdrop-blur"
+        >
+          <LocateFixed size={18} />
+        </button>
+      )}
 
       {selectedSat && (
         <InfoPanel
