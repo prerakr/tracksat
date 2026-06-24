@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { LocateFixed } from 'lucide-react'
-import { GlobeView } from './components/GlobeView'
+import { GlobeView, ORBITAL_ZONES } from './components/GlobeView'
 import type { GlobeViewHandle } from './components/GlobeView'
+import { ZoneLegend } from './components/ZoneLegend'
 import { InfoPanel } from './components/InfoPanel'
 import { StatsBar } from './components/StatsBar'
 import { SearchBar } from './components/SearchBar'
@@ -22,6 +23,16 @@ export default function App() {
   const [selectedSat, setSelectedSat] = useState<(SatelliteRecord & SatPosition) | null>(null)
   const [groundTrack, setGroundTrack] = useState<ArcSegment[]>([])
   const [activeCategories, setActiveCategories] = useState<Set<SatCategory>>(new Set(ALL_CATEGORIES))
+  const [visibleZones, setVisibleZones] = useState<Set<string>>(new Set(ORBITAL_ZONES.map(z => z.name)))
+
+  const toggleZone = useCallback((name: string) => {
+    setVisibleZones(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     if (!selectedSat) { setGroundTrack([]); return }
@@ -84,9 +95,12 @@ export default function App() {
           activeCategories={activeCategories}
           groundTrack={groundTrack}
           userLocation={userLocation}
+          visibleZones={visibleZones}
           onSelectSat={handleSelectSat}
         />
       </div>
+
+      <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
 
       {userLocation && (
         <button

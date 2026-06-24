@@ -23,6 +23,7 @@ interface Props {
   activeCategories: Set<SatCategory>
   groundTrack: ArcSegment[]
   userLocation: UserLocation | null
+  visibleZones: Set<string>
   onSelectSat: (sat: SatelliteRecord & SatPosition) => void
 }
 
@@ -50,16 +51,68 @@ const _orbitMat = new THREE.LineDashedMaterial({
   transparent: true,
 })
 
+export const ORBITAL_ZONES = [
+  { name: 'LEO', altKm: 2_000,  color: '#60a5fa', label: '160 – 2,000 km' },
+  { name: 'MEO', altKm: 20_200, color: '#a78bfa', label: '2,000 – 35,786 km (GPS ≈ 20,200 km)' },
+  { name: 'GEO', altKm: 35_786, color: '#f97316', label: '≈ 35,786 km' },
+] as const
+
 export const GlobeView = forwardRef<GlobeViewHandle, Props>(
-  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, onSelectSat }, ref) {
+  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, onSelectSat }, ref) {
     const globeRef = useRef<GlobeMethods | undefined>(undefined)
     const orbitLineRef = useRef<THREE.Line | null>(null)
+    const zoneShellsRef = useRef<THREE.Group[]>([])
 
     useImperativeHandle(ref, () => ({
       flyTo: (lat, lng, altitude = 1.5) => {
         globeRef.current?.pointOfView({ lat, lng, altitude }, 1200)
       },
     }))
+
+    // Zone boundary shells — explicit lat/lng rings so the grid is evenly distributed,
+    // not concentrated at the poles the way EdgesGeometry is.
+    const initZones = useCallback(() => {
+      const globe = globeRef.current
+      if (!globe || zoneShellsRef.current.length > 0) return
+      const scene = globe.scene()
+
+      for (const z of ORBITAL_ZONES) {
+        const visualAlt = altToVisual(z.altKm)
+        const mat = new THREE.LineBasicMaterial({ color: z.color, transparent: true, opacity: 0.45 })
+        const group = new THREE.Group()
+
+        // 5 latitude parallels
+        for (const lat of [-60, -30, 0, 30, 60]) {
+          const pts: THREE.Vector3[] = []
+          for (let i = 0; i <= 128; i++) {
+            const lng = (i / 128) * 360 - 180
+            const c = globe.getCoords(lat, lng, visualAlt)
+            pts.push(new THREE.Vector3(c.x, c.y, c.z))
+          }
+          group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat))
+        }
+
+        // 8 meridians every 45°
+        for (let lng = 0; lng < 360; lng += 45) {
+          const pts: THREE.Vector3[] = []
+          for (let i = 0; i <= 128; i++) {
+            const lat = (i / 128) * 180 - 90
+            const c = globe.getCoords(lat, lng, visualAlt)
+            pts.push(new THREE.Vector3(c.x, c.y, c.z))
+          }
+          group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat))
+        }
+
+        scene.add(group)
+        zoneShellsRef.current.push(group)
+      }
+    }, [])
+
+    useEffect(() => {
+      zoneShellsRef.current.forEach((group, i) => {
+        group.visible = visibleZones.has(ORBITAL_ZONES[i].name)
+      })
+    }, [visibleZones])
 
     useEffect(() => {
       if (!globeRef.current) return
@@ -71,6 +124,24 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       controls.autoRotate = true
       controls.autoRotateSpeed = 0.3
       controls.addEventListener('start', () => { controls.autoRotate = false })
+    }, [])
+
+    useEffect(() => {
+      return () => {
+        const globe = globeRef.current
+        if (!globe) return
+        const scene = globe.scene()
+        for (const g of zoneShellsRef.current) {
+          scene.remove(g)
+          g.traverse(obj => {
+            if (obj instanceof THREE.Line) {
+              obj.geometry.dispose()
+              ;(obj.material as THREE.Material).dispose()
+            }
+          })
+        }
+        zoneShellsRef.current = []
+      }
     }, [])
 
     // Orbit line: single THREE.Line — 1 draw call, no per-frame animation
@@ -159,6 +230,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
           </div>`
         }}
         onCustomLayerClick={(obj: object) => handleCustomClick(obj)}
+        onGlobeReady={initZones}
         ringsData={locationRings}
         ringLat="lat"
         ringLng="lng"
