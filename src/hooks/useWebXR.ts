@@ -12,14 +12,12 @@ export function useWebXR() {
   const enter = useCallback(async (): Promise<XRSession | null> => {
     if (!navigator.xr) return null
     try {
-      const root = document.getElementById('root') ?? undefined
+      // No dom-overlay: Quest's browser does not reliably composite it, and when
+      // present it forwards controller `select` as DOM pointer events that fight
+      // our in-scene raycasting. All XR UI is rendered as a 3D menu in the scene.
       const session = await navigator.xr.requestSession('immersive-ar', {
         requiredFeatures: ['local-floor'],
-        optionalFeatures: [
-          'hand-tracking',
-          ...(root ? (['dom-overlay'] as XRSessionInit['optionalFeatures']) : []),
-        ],
-        ...(root ? { domOverlay: { root } } : {}),
+        optionalFeatures: ['hand-tracking'],
       })
       sessionRef.current = session
       session.addEventListener('end', () => {

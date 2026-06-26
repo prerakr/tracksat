@@ -23,15 +23,32 @@ export default function App() {
   const { isSupported: xrSupported, isPresenting: xrPresenting, enter: enterXR, exit: exitXR } = useWebXR()
   const globeViewRef = useRef<GlobeViewHandle>(null)
 
+  // If the XR session ends for any reason (crash, Quest home button, etc.)
+  // always call exitXR so the scene is restored. exitXR is idempotent — safe
+  // to call even if the exit button was already pressed.
+  const prevXrPresenting = useRef(false)
+  useEffect(() => {
+    if (prevXrPresenting.current && !xrPresenting) {
+      globeViewRef.current?.exitXR()
+    }
+    prevXrPresenting.current = xrPresenting
+  }, [xrPresenting])
+
   const handleEnterXR = useCallback(async () => {
     const session = await enterXR()
-    if (session) await globeViewRef.current?.enterXR(session)
+    if (session) {
+      await globeViewRef.current?.enterXR(session)
+    }
   }, [enterXR])
 
   const handleExitXR = useCallback(() => {
     globeViewRef.current?.exitXR()
     exitXR()
   }, [exitXR])
+
+  const handleTogglePassthrough = useCallback(() => {
+    globeViewRef.current?.togglePassthrough()
+  }, [])
 
   const [selectedSat, setSelectedSat] = useState<(SatelliteRecord & SatPosition) | null>(null)
   const [groundTrack, setGroundTrack] = useState<ArcSegment[]>([])
@@ -87,20 +104,39 @@ export default function App() {
   }
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-black">
-      <StatsBar
-        total={satellites.length}
-        visible={visibleCount}
-        lastFetch={lastFetch}
-        loading={loading}
-      />
+    <div className={`relative w-screen h-screen ${xrPresenting ? '' : 'overflow-hidden bg-black'}`}>
 
-      <div className="absolute top-10 left-0 right-0 z-10 flex flex-wrap items-center gap-3 px-4 py-2 bg-slate-950/80 backdrop-blur border-b border-slate-800">
-        <SearchBar satellites={satellites} onSelect={handleSearchSelect} />
-        <FilterBar activeCategories={activeCategories} onToggle={toggleCategory} />
-      </div>
+      {/* Desktop UI — hidden during XR to reduce overlay clutter */}
+      {!xrPresenting && (
+        <>
+          <StatsBar
+            total={satellites.length}
+            visible={visibleCount}
+            lastFetch={lastFetch}
+            loading={loading}
+          />
 
-      <div className="absolute inset-0 pt-20">
+          <div className="absolute top-10 left-0 right-0 z-10 flex flex-wrap items-center gap-3 px-4 py-2 bg-slate-950/80 backdrop-blur border-b border-slate-800">
+            <SearchBar satellites={satellites} onSelect={handleSearchSelect} />
+            <FilterBar activeCategories={activeCategories} onToggle={toggleCategory} />
+          </div>
+
+          <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
+
+          {userLocation && (
+            <button
+              onClick={() => globeViewRef.current?.flyTo(userLocation.lat, userLocation.lng)}
+              title="Center on my location"
+              className="absolute bottom-6 right-6 z-20 flex items-center justify-center w-10 h-10 rounded-full bg-slate-800/90 border border-slate-600 text-blue-400 hover:bg-slate-700 hover:border-blue-500 hover:text-blue-300 transition-colors shadow-lg backdrop-blur"
+            >
+              <LocateFixed size={18} />
+            </button>
+          )}
+        </>
+      )}
+
+      {/* Globe — always rendered */}
+      <div className={`absolute inset-0 ${!xrPresenting ? 'pt-20' : ''}`}>
         <GlobeView
           ref={globeViewRef}
           satellites={satellites}
@@ -110,11 +146,20 @@ export default function App() {
           userLocation={userLocation}
           visibleZones={visibleZones}
           onSelectSat={handleSelectSat}
+          visibleCount={visibleCount}
+          totalCount={satellites.length}
+          onToggleCategory={toggleCategory}
+          onToggleZone={toggleZone}
+          onTogglePassthrough={handleTogglePassthrough}
+          onLocateXR={() => userLocation && globeViewRef.current?.flyTo(userLocation.lat, userLocation.lng)}
+          onExitXR={handleExitXR}
         />
       </div>
 
-      <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
+      {/* In XR, all controls live in the 3D scene menu (GlobeView/xrMenu),
+          because Quest does not reliably composite an HTML dom-overlay. */}
 
+      {/* Enter AR button — visible on desktop too when supported */}
       <XRButton
         isSupported={xrSupported}
         isPresenting={xrPresenting}
@@ -122,16 +167,7 @@ export default function App() {
         onExit={handleExitXR}
       />
 
-      {userLocation && (
-        <button
-          onClick={() => globeViewRef.current?.flyTo(userLocation.lat, userLocation.lng)}
-          title="Center on my location"
-          className="absolute bottom-6 right-6 z-20 flex items-center justify-center w-10 h-10 rounded-full bg-slate-800/90 border border-slate-600 text-blue-400 hover:bg-slate-700 hover:border-blue-500 hover:text-blue-300 transition-colors shadow-lg backdrop-blur"
-        >
-          <LocateFixed size={18} />
-        </button>
-      )}
-
+      {/* Info panel — visible in both modes */}
       {selectedSat && (
         <InfoPanel
           sat={selectedSat}
