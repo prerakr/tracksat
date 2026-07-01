@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { LocateFixed } from 'lucide-react'
 import { GlobeView, ORBITAL_ZONES } from './components/GlobeView'
-import type { GlobeViewHandle } from './components/GlobeView'
+import type { GlobeViewHandle, ScaleMode } from './components/GlobeView'
 import { ZoneLegend } from './components/ZoneLegend'
+import { ScaleToggle } from './components/ScaleToggle'
 import { InfoPanel } from './components/InfoPanel'
 import { StatsBar } from './components/StatsBar'
 import { SearchBar } from './components/SearchBar'
@@ -24,6 +25,7 @@ export default function App() {
   const [groundTrack, setGroundTrack] = useState<ArcSegment[]>([])
   const [activeCategories, setActiveCategories] = useState<Set<SatCategory>>(new Set(ALL_CATEGORIES))
   const [visibleZones, setVisibleZones] = useState<Set<string>>(new Set(ORBITAL_ZONES.map(z => z.name)))
+  const [scaleMode, setScaleMode] = useState<ScaleMode>('compressed')
 
   const toggleZone = useCallback((name: string) => {
     setVisibleZones(prev => {
@@ -96,11 +98,15 @@ export default function App() {
           groundTrack={groundTrack}
           userLocation={userLocation}
           visibleZones={visibleZones}
+          scaleMode={scaleMode}
           onSelectSat={handleSelectSat}
         />
       </div>
 
-      <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
+      <div className="absolute bottom-6 left-4 z-20 flex flex-col gap-2">
+        <ScaleToggle scaleMode={scaleMode} onChange={setScaleMode} />
+        <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
+      </div>
 
       {userLocation && (
         <button

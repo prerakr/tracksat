@@ -24,14 +24,25 @@ interface Props {
   groundTrack: ArcSegment[]
   userLocation: UserLocation | null
   visibleZones: Set<string>
+  scaleMode: ScaleMode
   onSelectSat: (sat: SatelliteRecord & SatPosition) => void
 }
 
-// Log scale: 0 = surface, ~0.05 = ISS, ~0.6 = GPS, ~0.8 = GEO
-function altToVisual(altKm: number): number {
+export type ScaleMode = 'compressed' | 'true'
+
+const EARTH_RADIUS_KM = 6378.137
+
+// Log scale: 0 = surface, ~0.05 = ISS, ~0.6 = GPS, ~0.8 = GEO — keeps LEO/MEO/GEO
+// all visible in one frame instead of GEO satellites sitting ~5.6 globe-radii out.
+function altToVisualCompressed(altKm: number): number {
   if (altKm <= 0) return 0
   const clamped = Math.min(altKm, 42_164)
   return Math.log(clamped / 150 + 1) / Math.log(42_164 / 150 + 1) * 0.8
+}
+
+// Physically accurate: altitude expressed in Earth radii above the surface.
+function altToVisualTrueScale(altKm: number): number {
+  return Math.max(altKm, 0) / EARTH_RADIUS_KM
 }
 
 // Shared geometry + per-colour material cache — avoids re-allocating for 5000+ dots
@@ -58,10 +69,11 @@ export const ORBITAL_ZONES = [
 ] as const
 
 export const GlobeView = forwardRef<GlobeViewHandle, Props>(
-  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, onSelectSat }, ref) {
+  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, onSelectSat }, ref) {
     const globeRef = useRef<GlobeMethods | undefined>(undefined)
     const orbitLineRef = useRef<THREE.Line | null>(null)
     const zoneShellsRef = useRef<THREE.Group[]>([])
+    const altToVisual = scaleMode === 'true' ? altToVisualTrueScale : altToVisualCompressed
 
     useImperativeHandle(ref, () => ({
       flyTo: (lat, lng, altitude = 1.5) => {
@@ -71,15 +83,28 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
 
     // Zone boundary shells — explicit lat/lng rings so the grid is evenly distributed,
     // not concentrated at the poles the way EdgesGeometry is.
-    const initZones = useCallback(() => {
+    const buildZones = useCallback(() => {
       const globe = globeRef.current
-      if (!globe || zoneShellsRef.current.length > 0) return
+      if (!globe) return
       const scene = globe.scene()
+
+      // Tear down any shells built under the previous scale mode first.
+      for (const g of zoneShellsRef.current) {
+        scene.remove(g)
+        g.traverse(obj => {
+          if (obj instanceof THREE.Line) {
+            obj.geometry.dispose()
+            ;(obj.material as THREE.Material).dispose()
+          }
+        })
+      }
+      zoneShellsRef.current = []
 
       for (const z of ORBITAL_ZONES) {
         const visualAlt = altToVisual(z.altKm)
         const mat = new THREE.LineBasicMaterial({ color: z.color, transparent: true, opacity: 0.45 })
         const group = new THREE.Group()
+        group.visible = visibleZones.has(z.name)
 
         // 5 latitude parallels
         for (const lat of [-60, -30, 0, 30, 60]) {
@@ -106,7 +131,13 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         scene.add(group)
         zoneShellsRef.current.push(group)
       }
-    }, [])
+    }, [altToVisual, visibleZones])
+
+    // Rebuilds the zone shells whenever the altitude scale mode toggles
+    // (also fires harmlessly pre-mount, before the globe is ready).
+    useEffect(() => {
+      buildZones()
+    }, [buildZones])
 
     useEffect(() => {
       zoneShellsRef.current.forEach((group, i) => {
@@ -179,7 +210,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         scene.remove(line)
         geo.dispose()
       }
-    }, [groundTrack])
+    }, [groundTrack, altToVisual])
 
     const pointsData = useMemo<PointDatum[]>(() => {
       const result: PointDatum[] = []
@@ -230,7 +261,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
           </div>`
         }}
         onCustomLayerClick={(obj: object) => handleCustomClick(obj)}
-        onGlobeReady={initZones}
+        onGlobeReady={buildZones}
         ringsData={locationRings}
         ringLat="lat"
         ringLng="lng"
