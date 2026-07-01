@@ -75,6 +75,11 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
     const zoneShellsRef = useRef<THREE.Group[]>([])
     const altToVisual = scaleMode === 'true' ? altToVisualTrueScale : altToVisualCompressed
 
+    // Read via ref inside buildZones so toggling zone visibility doesn't force
+    // a full geometry rebuild — only a scale-mode change (altToVisual) should.
+    const visibleZonesRef = useRef(visibleZones)
+    visibleZonesRef.current = visibleZones
+
     useImperativeHandle(ref, () => ({
       flyTo: (lat, lng, altitude = 1.5) => {
         globeRef.current?.pointOfView({ lat, lng, altitude }, 1200)
@@ -104,7 +109,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         const visualAlt = altToVisual(z.altKm)
         const mat = new THREE.LineBasicMaterial({ color: z.color, transparent: true, opacity: 0.45 })
         const group = new THREE.Group()
-        group.visible = visibleZones.has(z.name)
+        group.visible = visibleZonesRef.current.has(z.name)
 
         // 5 latitude parallels
         for (const lat of [-60, -30, 0, 30, 60]) {
@@ -131,7 +136,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         scene.add(group)
         zoneShellsRef.current.push(group)
       }
-    }, [altToVisual, visibleZones])
+    }, [altToVisual])
 
     // Rebuilds the zone shells whenever the altitude scale mode toggles
     // (also fires harmlessly pre-mount, before the globe is ready).
@@ -209,6 +214,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       return () => {
         scene.remove(line)
         geo.dispose()
+        if (orbitLineRef.current === line) orbitLineRef.current = null
       }
     }, [groundTrack, altToVisual])
 
