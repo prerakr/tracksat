@@ -51,6 +51,43 @@ export interface PacmanActor {
 const _move = new THREE.Vector3()
 const _axis = new THREE.Vector3()
 
+// Parallel transport alone is exact locally but accumulates *holonomy* over
+// paths that enclose area on the sphere (Gauss-Bonnet) — looping anywhere
+// near a pole can rotate the carried frame by up to ~180° relative to true
+// north. Since the camera's "up" stays fixed to true north, enough drift
+// makes WASD feel inverted. Gently nudging the carried frame back toward
+// the freshly computed true-north frame keeps it aligned with the screen
+// over the course of normal play.
+//
+// This has to stay off entirely within POLE_DEADZONE_DEG of either pole:
+// true north's *azimuth* changes arbitrarily fast in a small neighborhood
+// of a pole (meridians all converge there), so even a slow, heavily-damped
+// pull toward it measurably perturbs movement and can trap the player in a
+// short loop right at a pole-crossing instead of carrying them through —
+// tuned empirically against a standalone rotation-math test harness (rate
+// any higher, or a dead zone much smaller, reintroduces multi-second
+// entrapment; both eliminate it down to a sub-frame-perceptible ~0.3s blip).
+const FRAME_REALIGN_RATE = 0.5 // per second
+const POLE_DEADZONE_DEG = 25
+
+const _realignRadial = new THREE.Vector3()
+const _realignCross = new THREE.Vector3()
+
+function realignFrameTowardTrueNorth(actor: PacmanActor, dt: number): void {
+  _realignRadial.copy(actor.position).normalize()
+  const colatitudeDeg = Math.acos(Math.max(-1, Math.min(1, _realignRadial.y))) * (180 / Math.PI)
+  const distToPoleDeg = Math.min(colatitudeDeg, 180 - colatitudeDeg)
+  if (distToPoleDeg < POLE_DEADZONE_DEG) return
+
+  const trueFrame = buildTangentFrame(actor.position)
+  _realignCross.copy(actor.frame.north).cross(trueFrame.north)
+  const angle = Math.atan2(_realignCross.dot(_realignRadial), actor.frame.north.dot(trueFrame.north))
+
+  const t = Math.min(1, FRAME_REALIGN_RATE * dt) * angle
+  actor.frame.north.applyAxisAngle(_realignRadial, t)
+  actor.frame.east.applyAxisAngle(_realignRadial, t)
+}
+
 // Hard-snapped to the shell (no free-flight drift) since precise maze-like
 // movement matters more here than the smooth momentum shuttlePhysics goes for.
 //
@@ -72,14 +109,16 @@ export function tickPacmanPlayer(
   if (keys.backward) _move.addScaledVector(actor.frame.north, -1)
   if (keys.strafeRight) _move.addScaledVector(actor.frame.east, 1)
   if (keys.strafeLeft) _move.addScaledVector(actor.frame.east, -1)
-  if (_move.lengthSq() === 0) return
+  if (_move.lengthSq() > 0) {
+    _move.normalize()
+    _axis.copy(_move).cross(actor.position).normalize()
+    const angle = (worldRadius * PLAYER_SPEED_FRAC * dt) / shellRadius
+    actor.position.applyAxisAngle(_axis, angle)
+    actor.frame.north.applyAxisAngle(_axis, angle)
+    actor.frame.east.applyAxisAngle(_axis, angle)
+  }
 
-  _move.normalize()
-  _axis.copy(_move).cross(actor.position).normalize()
-  const angle = (worldRadius * PLAYER_SPEED_FRAC * dt) / shellRadius
-  actor.position.applyAxisAngle(_axis, angle)
-  actor.frame.north.applyAxisAngle(_axis, angle)
-  actor.frame.east.applyAxisAngle(_axis, angle)
+  realignFrameTowardTrueNorth(actor, dt)
 }
 
 export type GhostMode = 'wander' | 'chase' | 'frightened'
