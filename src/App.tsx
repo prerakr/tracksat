@@ -69,6 +69,10 @@ export default function App() {
     setPacmanGameOver(s)
   }, [])
 
+  const handlePacmanPopup = useCallback((message: string) => {
+    pacmanHudRef.current?.showPopup(message)
+  }, [])
+
   const handleRestart = useCallback(() => {
     setGameOver(null)
     setPacmanGameOver(null)
@@ -161,6 +165,7 @@ export default function App() {
           onTelemetry={handleTelemetry}
           onPacmanTelemetry={handlePacmanTelemetry}
           onPacmanGameOver={handlePacmanGameOver}
+          onPacmanPopup={handlePacmanPopup}
         />
       </div>
 

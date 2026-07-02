@@ -24,4 +24,5 @@ export interface PacmanTelemetry {
 export interface PacmanGameOverState {
   won: boolean
   score: number
+  message: string
 }

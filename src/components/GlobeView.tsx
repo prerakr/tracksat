@@ -16,6 +16,7 @@ import {
   POWER_DURATION_SEC, PLAYER_LIVES, GHOST_COLORS,
 } from '../lib/pacmanPhysics'
 import type { PacmanActor, GhostActor } from '../lib/pacmanPhysics'
+import { PROGRESS_MESSAGES, POWER_MESSAGES, GHOST_MESSAGES, WIN_MESSAGES, PROGRESS_MILESTONES, pickMessage } from '../lib/pacmanMessages'
 import type { ShuttleTelemetry, PacmanTelemetry, PacmanGameOverState, GameMode, PacmanScope } from '../types/game'
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -46,6 +47,7 @@ interface Props {
   onTelemetry: (t: ShuttleTelemetry) => void
   onPacmanTelemetry: (t: PacmanTelemetry) => void
   onPacmanGameOver: (s: PacmanGameOverState) => void
+  onPacmanPopup: (message: string) => void
 }
 
 export type ScaleMode = 'compressed' | 'true'
@@ -124,7 +126,7 @@ export const ORBITAL_ZONES = [
 ] as const
 
 export const GlobeView = forwardRef<GlobeViewHandle, Props>(
-  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, gameMode, pacmanScope, restartKey, onSelectSat, onCollision, onTelemetry, onPacmanTelemetry, onPacmanGameOver }, ref) {
+  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, gameMode, pacmanScope, restartKey, onSelectSat, onCollision, onTelemetry, onPacmanTelemetry, onPacmanGameOver, onPacmanPopup }, ref) {
     const globeRef = useRef<GlobeMethods | undefined>(undefined)
     const orbitLineRef = useRef<THREE.Line | null>(null)
     const zoneShellsRef = useRef<THREE.Group[]>([])
@@ -153,6 +155,8 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
     onPacmanTelemetryRef.current = onPacmanTelemetry
     const onPacmanGameOverRef = useRef(onPacmanGameOver)
     onPacmanGameOverRef.current = onPacmanGameOver
+    const onPacmanPopupRef = useRef(onPacmanPopup)
+    onPacmanPopupRef.current = onPacmanPopup
 
     // Read via ref inside buildZones so toggling zone visibility doesn't force
     // a full geometry rebuild — only a scale-mode change (altToVisual) should.
@@ -385,6 +389,14 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       let invulnUntil = performance.now() + 2500
       let ended = false
 
+      // Sarcastic popup state: track which progress-milestone fraction we've
+      // already fired (milestones are ascending, so a single cursor suffices)
+      // and the last message shown per pool so back-to-back popups don't repeat.
+      let nextMilestoneIdx = 0
+      let lastProgressMsg: string | undefined
+      let lastPowerMsg: string | undefined
+      let lastGhostMsg: string | undefined
+
       setPacmanPellets(Array.from(level.pellets.values()))
 
       const playerMesh = new THREE.Mesh(_pacmanGeo, _pacmanMat)
@@ -425,12 +437,25 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
           if (pellet.power) {
             poweredUntil = now + POWER_DURATION_SEC * 1000
             score += 50
+            lastPowerMsg = pickMessage(POWER_MESSAGES, lastPowerMsg)
+            onPacmanPopupRef.current(lastPowerMsg)
           } else {
             score += 10
           }
         }
         if (ateSomething) {
           setPacmanPellets(prev => prev.filter(p => !eaten.has(p.id)))
+
+          const eatenFrac = eaten.size / level.pellets.size
+          let crossedMilestone = false
+          while (nextMilestoneIdx < PROGRESS_MILESTONES.length && eatenFrac >= PROGRESS_MILESTONES[nextMilestoneIdx]) {
+            nextMilestoneIdx++
+            crossedMilestone = true
+          }
+          if (crossedMilestone) {
+            lastProgressMsg = pickMessage(PROGRESS_MESSAGES, lastProgressMsg)
+            onPacmanPopupRef.current(lastProgressMsg)
+          }
         }
 
         if (!ended && now > invulnUntil) {
@@ -450,9 +475,12 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
               ghosts[i].position.copy(level.ghostSpawns[i])
               ghosts[i].waypoint.copy(level.ghostSpawns[i])
               ghosts[i].mode = 'wander'
+              lastGhostMsg = pickMessage(GHOST_MESSAGES, lastGhostMsg)
               if (lives <= 0) {
                 ended = true
-                onPacmanGameOverRef.current({ won: false, score })
+                onPacmanGameOverRef.current({ won: false, score, message: lastGhostMsg })
+              } else {
+                onPacmanPopupRef.current(lastGhostMsg)
               }
             }
             break
@@ -471,7 +499,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
 
         if (!ended && pelletsRemaining === 0) {
           ended = true
-          onPacmanGameOverRef.current({ won: true, score })
+          onPacmanGameOverRef.current({ won: true, score, message: pickMessage(WIN_MESSAGES) })
         }
 
         // Full-globe camera, matching the app's default landing view: always
