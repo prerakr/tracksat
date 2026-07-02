@@ -1,5 +1,4 @@
 import * as THREE from 'three'
-import type { FlightKeyState } from '../hooks/useKeyboardInput'
 
 export const PLAYER_SPEED_FRAC = 0.24 // fraction of world radius per second
 export const GHOST_SPEED_FRAC = 0.16
@@ -97,19 +96,24 @@ function realignFrameTowardTrueNorth(actor: PacmanActor, dt: number): void {
 // most of the step becomes a radial component that renormalizing back onto
 // the shell just discards, which is what made movement feel like it was
 // slowing to a crawl far from spawn (worst in the All Starlink scope).
+//
+// `moveX`/`moveY` are a tangent-frame-relative direction (east/north), not
+// literally WASD — the caller collapses keyboard booleans and/or an analog
+// touch joystick vector into this pair, so both input methods drive the same
+// rotation math and only the direction matters (speed stays constant
+// regardless of how far a touch joystick is deflected past its deadzone).
 export function tickPacmanPlayer(
   actor: PacmanActor,
-  keys: FlightKeyState,
+  moveX: number,
+  moveY: number,
   dt: number,
   worldRadius: number,
   shellRadius: number,
 ): void {
   _move.set(0, 0, 0)
-  if (keys.forward) _move.addScaledVector(actor.frame.north, 1)
-  if (keys.backward) _move.addScaledVector(actor.frame.north, -1)
-  if (keys.strafeRight) _move.addScaledVector(actor.frame.east, 1)
-  if (keys.strafeLeft) _move.addScaledVector(actor.frame.east, -1)
-  if (_move.lengthSq() > 0) {
+  _move.addScaledVector(actor.frame.north, moveY)
+  _move.addScaledVector(actor.frame.east, moveX)
+  if (_move.lengthSq() > 1e-6) {
     _move.normalize()
     // Rotating a point C around axis A moves it in direction A×C. We want
     // that to equal `_move`, which needs A = C×_move (position×move) — not
