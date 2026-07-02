@@ -4,6 +4,9 @@ import { GlobeView, ORBITAL_ZONES } from './components/GlobeView'
 import type { GlobeViewHandle, ScaleMode } from './components/GlobeView'
 import { ZoneLegend } from './components/ZoneLegend'
 import { ScaleToggle } from './components/ScaleToggle'
+import { GameModeToggle } from './components/GameModeToggle'
+import { ShuttleHUD } from './components/ShuttleHUD'
+import type { ShuttleHUDHandle } from './components/ShuttleHUD'
 import { InfoPanel } from './components/InfoPanel'
 import { StatsBar } from './components/StatsBar'
 import { SearchBar } from './components/SearchBar'
@@ -14,6 +17,7 @@ import { useUserLocation } from './hooks/useUserLocation'
 import { computeGroundTrack } from './lib/groundTrack'
 import { ALL_CATEGORIES } from './lib/categories'
 import type { SatelliteRecord, SatPosition, ArcSegment, SatCategory } from './types/satellite'
+import type { ShuttleTelemetry, GameOverState } from './types/game'
 
 export default function App() {
   const { satellites, loading, error, lastFetch } = useSatellites()
@@ -26,6 +30,36 @@ export default function App() {
   const [activeCategories, setActiveCategories] = useState<Set<SatCategory>>(new Set(ALL_CATEGORIES))
   const [visibleZones, setVisibleZones] = useState<Set<string>>(new Set(ORBITAL_ZONES.map(z => z.name)))
   const [scaleMode, setScaleMode] = useState<ScaleMode>('compressed')
+  const [gameMode, setGameMode] = useState(false)
+  const [gameOver, setGameOver] = useState<GameOverState | null>(null)
+  const [restartKey, setRestartKey] = useState(0)
+  const hudRef = useRef<ShuttleHUDHandle>(null)
+
+  const handleGameModeChange = useCallback((active: boolean) => {
+    setGameMode(active)
+    setGameOver(null)
+    // True-scale spacing would make the game's play area essentially empty —
+    // force the shared frame the shuttle/obstacles rely on while flying.
+    if (active) setScaleMode('compressed')
+  }, [])
+
+  const handleCollision = useCallback((survivedSec: number) => {
+    setGameOver({ survivedSec })
+  }, [])
+
+  const handleTelemetry = useCallback((t: ShuttleTelemetry) => {
+    hudRef.current?.update(t)
+  }, [])
+
+  const handleRestart = useCallback(() => {
+    setGameOver(null)
+    setRestartKey(k => k + 1)
+  }, [])
+
+  const handleExitFromGameOver = useCallback(() => {
+    setGameOver(null)
+    setGameMode(false)
+  }, [])
 
   const toggleZone = useCallback((name: string) => {
     setVisibleZones(prev => {
@@ -99,13 +133,22 @@ export default function App() {
           userLocation={userLocation}
           visibleZones={visibleZones}
           scaleMode={scaleMode}
+          gameMode={gameMode}
+          restartKey={restartKey}
           onSelectSat={handleSelectSat}
+          onCollision={handleCollision}
+          onTelemetry={handleTelemetry}
         />
       </div>
 
+      {gameMode && (
+        <ShuttleHUD ref={hudRef} gameOver={gameOver} onRestart={handleRestart} onExit={handleExitFromGameOver} />
+      )}
+
       <div className="absolute bottom-6 left-4 z-20 flex flex-col gap-2">
-        <ScaleToggle scaleMode={scaleMode} onChange={setScaleMode} />
+        {!gameMode && <ScaleToggle scaleMode={scaleMode} onChange={setScaleMode} />}
         <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
+        <GameModeToggle active={gameMode} onChange={handleGameModeChange} />
       </div>
 
       {userLocation && (
