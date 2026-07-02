@@ -5,6 +5,12 @@ import * as THREE from 'three'
 import type { SatelliteRecord, SatPosition, ArcSegment } from '../types/satellite'
 import type { SatCategory } from '../types/satellite'
 import type { UserLocation } from '../hooks/useUserLocation'
+import { useKeyboardInput } from '../hooks/useKeyboardInput'
+import { useShuttleFlight } from '../hooks/useShuttleFlight'
+import { tickShuttle, MAX_SPEED_FRAC } from '../lib/shuttlePhysics'
+import { useGameObstacles, COLLISION_RADIUS } from '../hooks/useGameObstacles'
+import type { ShuttleTelemetry } from '../types/game'
+import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 interface PointDatum extends SatelliteRecord {
   lat: number
@@ -25,7 +31,11 @@ interface Props {
   userLocation: UserLocation | null
   visibleZones: Set<string>
   scaleMode: ScaleMode
+  gameMode: boolean
+  restartKey: number
   onSelectSat: (sat: SatelliteRecord & SatPosition) => void
+  onCollision: (survivedSec: number) => void
+  onTelemetry: (t: ShuttleTelemetry) => void
 }
 
 export type ScaleMode = 'compressed' | 'true'
@@ -45,6 +55,19 @@ function altToVisualTrueScale(altKm: number): number {
   return Math.max(altKm, 0) / EARTH_RADIUS_KM
 }
 
+// Inverse of altToVisualCompressed — lets the game HUD show an honest real-km
+// altitude reading even though the shuttle flies in the log-compressed frame.
+// The shuttle isn't orbit-constrained like the satellites, so a straight-line
+// flight path can carry it well past the GEO-equivalent visual radius the
+// forward mapping was designed for; clamp the input so the inverse doesn't
+// extrapolate into physically meaningless (and numerically explosive) output.
+function visualToAltKmCompressed(visualAlt: number): number {
+  const clamped = Math.max(0, Math.min(visualAlt, 0.8))
+  if (clamped <= 0) return 0
+  const ratio = Math.exp((clamped / 0.8) * Math.log(42_164 / 150 + 1)) - 1
+  return ratio * 150
+}
+
 // Shared geometry + per-colour material cache — avoids re-allocating for 5000+ dots
 const _satGeo = new THREE.SphereGeometry(0.5, 5, 4)
 const _matCache = new Map<string, THREE.MeshBasicMaterial>()
@@ -62,6 +85,16 @@ const _orbitMat = new THREE.LineDashedMaterial({
   transparent: true,
 })
 
+// Shuttle mesh — apex points along local -Z to match the forward convention
+// used by tickShuttle/the chase camera.
+const _shuttleGeo = new THREE.ConeGeometry(1.5, 5, 8)
+_shuttleGeo.rotateX(-Math.PI / 2)
+const _shuttleMat = new THREE.MeshBasicMaterial({ color: '#f8fafc' })
+
+const GAME_SPAWN_ALT_KM = 550 // Starlink shell
+const GAME_CHASE_DISTANCE = 10
+const GAME_CHASE_HEIGHT = 3
+
 export const ORBITAL_ZONES = [
   { name: 'LEO', altKm: 2_000,  color: '#60a5fa', label: '160 – 2,000 km' },
   { name: 'MEO', altKm: 20_200, color: '#a78bfa', label: '2,000 – 35,786 km (GPS ≈ 20,200 km)' },
@@ -69,11 +102,30 @@ export const ORBITAL_ZONES = [
 ] as const
 
 export const GlobeView = forwardRef<GlobeViewHandle, Props>(
-  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, onSelectSat }, ref) {
+  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, gameMode, restartKey, onSelectSat, onCollision, onTelemetry }, ref) {
     const globeRef = useRef<GlobeMethods | undefined>(undefined)
     const orbitLineRef = useRef<THREE.Line | null>(null)
     const zoneShellsRef = useRef<THREE.Group[]>([])
     const altToVisual = scaleMode === 'true' ? altToVisualTrueScale : altToVisualCompressed
+
+    const keysRef = useKeyboardInput(gameMode)
+    const { stateRef: shuttleStateRef, reset: resetShuttle } = useShuttleFlight()
+
+    const getCoords = useCallback((lat: number, lng: number, altVisual: number) => {
+      const globe = globeRef.current
+      return globe ? globe.getCoords(lat, lng, altVisual) : { x: 0, y: 0, z: 0 }
+    }, [])
+    const { getNearestObstacle, reset: resetObstacles } = useGameObstacles(
+      satellites, positions, getCoords, altToVisual, gameMode
+    )
+
+    // Latest-callback refs so the game-loop effect doesn't need to re-run
+    // (and re-spawn the shuttle) every time a parent re-render passes new
+    // inline function props — same pattern as visibleZonesRef below.
+    const onCollisionRef = useRef(onCollision)
+    onCollisionRef.current = onCollision
+    const onTelemetryRef = useRef(onTelemetry)
+    onTelemetryRef.current = onTelemetry
 
     // Read via ref inside buildZones so toggling zone visibility doesn't force
     // a full geometry rebuild — only a scale-mode change (altToVisual) should.
@@ -161,6 +213,114 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       controls.autoRotateSpeed = 0.3
       controls.addEventListener('start', () => { controls.autoRotate = false })
     }, [])
+
+    // Game mode: take over the camera from OrbitControls for the duration of
+    // the session (entry → exit), independent of any in-session restarts.
+    // OrbitControls.update() unconditionally recomputes the camera transform
+    // from its own spherical/target state on every call, and three-globe's
+    // internal render loop calls it every frame regardless of `enabled` — so
+    // `enabled = false` alone isn't enough, update() itself has to be
+    // neutralized or it will stomp the shuttle-driven camera each frame.
+    useEffect(() => {
+      const globe = globeRef.current
+      if (!globe || !gameMode) return
+
+      const controls = globe.controls() as OrbitControls
+      const priorPov = globe.pointOfView()
+      const priorEnabled = controls.enabled
+      const priorAutoRotate = controls.autoRotate
+      const originalUpdate = controls.update.bind(controls)
+      controls.enabled = false
+      controls.update = () => false
+
+      return () => {
+        controls.update = originalUpdate
+        controls.enabled = priorEnabled
+        controls.autoRotate = priorAutoRotate
+        globe.pointOfView(priorPov, 800)
+      }
+    }, [gameMode])
+
+    // Shuttle spawn + flight loop. Re-runs on every restart (restartKey bump)
+    // as well as on initial entry, without touching the controls takeover above.
+    useEffect(() => {
+      const globe = globeRef.current
+      if (!globe || !gameMode) return
+
+      const camera = globe.camera()
+      const scene = globe.scene()
+      const worldRadius = globe.getGlobeRadius()
+
+      resetObstacles()
+
+      const shellRadius = worldRadius * (1 + altToVisual(GAME_SPAWN_ALT_KM))
+      const spawnCoords = globe.getCoords(0, 0, altToVisual(GAME_SPAWN_ALT_KM))
+      const spawnPosition = new THREE.Vector3(spawnCoords.x, spawnCoords.y, spawnCoords.z)
+      const radial = spawnPosition.clone().normalize()
+      const east = new THREE.Vector3(0, 1, 0).cross(radial).normalize()
+      // A plain Object3D's lookAt() points its +Z (not -Z) at the target, so a
+      // THREE.Camera is used here to get the -Z-is-forward convention tickShuttle
+      // assumes (Object3D.lookAt swaps eye/target internally for non-camera objects).
+      const spawnFacing = new THREE.Camera()
+      spawnFacing.position.copy(spawnPosition)
+      spawnFacing.up.copy(radial)
+      spawnFacing.lookAt(spawnPosition.clone().add(east))
+      resetShuttle(spawnPosition, spawnFacing.quaternion)
+
+      const shuttle = new THREE.Mesh(_shuttleGeo, _shuttleMat)
+      shuttle.position.copy(spawnPosition)
+      shuttle.quaternion.copy(spawnFacing.quaternion)
+      scene.add(shuttle)
+
+      let rafId = 0
+      let lastFrame = performance.now()
+      const startTime = lastFrame
+      let ended = false
+      const forward = new THREE.Vector3()
+      const up = new THREE.Vector3()
+
+      const loop = (now: number) => {
+        const dt = Math.min((now - lastFrame) / 1000, 0.1)
+        lastFrame = now
+
+        const state = shuttleStateRef.current
+        tickShuttle(state, keysRef.current, dt, worldRadius, shellRadius)
+
+        shuttle.position.copy(state.position)
+        shuttle.quaternion.copy(state.quaternion)
+
+        // Rigid third-person chase camera: fixed offset behind/above the shuttle.
+        forward.set(0, 0, -1).applyQuaternion(state.quaternion)
+        up.set(0, 1, 0).applyQuaternion(state.quaternion)
+        camera.position.copy(state.position)
+          .addScaledVector(forward, -GAME_CHASE_DISTANCE)
+          .addScaledVector(up, GAME_CHASE_HEIGHT)
+        camera.quaternion.copy(state.quaternion)
+
+        const nearest = getNearestObstacle(state.position, now)
+        const elapsedSec = (now - startTime) / 1000
+        onTelemetryRef.current({
+          speedPct: (state.speed / (worldRadius * MAX_SPEED_FRAC)) * 100,
+          altitudeKm: visualToAltKmCompressed(state.position.length() / worldRadius - 1),
+          proximity: nearest ? nearest.distance : null,
+          elapsedSec,
+        })
+
+        if (nearest && nearest.distance <= COLLISION_RADIUS && !ended) {
+          ended = true
+          onCollisionRef.current(elapsedSec)
+          return // hard game-over: freeze in place, no further frames scheduled
+        }
+
+        rafId = requestAnimationFrame(loop)
+      }
+      rafId = requestAnimationFrame(loop)
+
+      return () => {
+        cancelAnimationFrame(rafId)
+        scene.remove(shuttle)
+      }
+    }, [gameMode, restartKey, altToVisual, resetShuttle, resetObstacles, getNearestObstacle, keysRef, shuttleStateRef])
 
     useEffect(() => {
       return () => {
