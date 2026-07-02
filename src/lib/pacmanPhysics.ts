@@ -28,7 +28,6 @@ export function buildTangentFrame(center: THREE.Vector3): TangentFrame {
 
 export interface PacmanActor {
   position: THREE.Vector3
-  heading: THREE.Vector3
 }
 
 const _move = new THREE.Vector3()
@@ -51,7 +50,6 @@ export function tickPacmanPlayer(
   if (_move.lengthSq() === 0) return
 
   _move.normalize()
-  actor.heading.copy(_move)
   actor.position.addScaledVector(_move, worldRadius * PLAYER_SPEED_FRAC * dt)
   actor.position.setLength(shellRadius)
 }

@@ -102,17 +102,19 @@ const _shuttleMat = new THREE.MeshBasicMaterial({ color: '#f8fafc' })
 
 // Pacman + ghost meshes — geometry shared/never disposed like the shuttle's;
 // ghost materials are created per-session (need live frighten-tint updates)
-// and disposed on session cleanup.
-const _pacmanGeo = new THREE.SphereGeometry(2.2, 12, 8)
+// and disposed on session cleanup. Sized against the 0.5-radius satellite
+// dots for legibility at the same full-globe zoom the game camera uses.
+const _pacmanGeo = new THREE.SphereGeometry(1.4, 12, 8)
 const _pacmanMat = new THREE.MeshBasicMaterial({ color: '#facc15' })
-const _ghostGeo = new THREE.SphereGeometry(1.8, 10, 8)
+const _ghostGeo = new THREE.SphereGeometry(1.1, 10, 8)
 const _frightenedColor = new THREE.Color('#1d4ed8')
 
 const GAME_SPAWN_ALT_KM = 550 // Starlink shell
 const GAME_CHASE_DISTANCE = 10
 const GAME_CHASE_HEIGHT = 3
-const PACMAN_CAM_HEIGHT = 16
-const PACMAN_CAM_BACK = 5
+// Matches globe.gl's own default landing altitude (2.5 globe-radii above the
+// surface) — the game camera never leaves this full-globe framing.
+const PACMAN_CAM_ALTITUDE = 2.5
 
 export const ORBITAL_ZONES = [
   { name: 'LEO', altKm: 2_000,  color: '#60a5fa', label: '160 – 2,000 km' },
@@ -362,7 +364,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       const level = buildPacmanLevel(satellites, positions, getCoords, altToVisual)
       if (!level) return // not enough Starlink data loaded yet
 
-      const player: PacmanActor = { position: level.playerSpawn.clone(), heading: level.frame.north.clone() }
+      const player: PacmanActor = { position: level.playerSpawn.clone() }
       const ghosts: GhostActor[] = level.ghostSpawns.map(spawn => ({
         position: spawn.clone(),
         waypoint: spawn.clone(),
@@ -392,7 +394,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
 
       let rafId = 0
       let lastFrame = performance.now()
-      const radialTmp = new THREE.Vector3()
+      const camDist = worldRadius * (1 + PACMAN_CAM_ALTITUDE)
 
       const loop = (now: number) => {
         const dt = Math.min((now - lastFrame) / 1000, 0.1)
@@ -465,14 +467,15 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
           onPacmanGameOverRef.current({ won: true, score })
         }
 
-        // Steep top-down chase camera: hovers above the player along the local
-        // radial, offset slightly behind the heading so orientation stays legible.
-        radialTmp.copy(player.position).normalize()
-        camera.position.copy(player.position)
-          .addScaledVector(radialTmp, PACMAN_CAM_HEIGHT)
-          .addScaledVector(player.heading, -PACMAN_CAM_BACK)
-        camera.up.copy(radialTmp)
-        camera.lookAt(player.position)
+        // Full-globe camera, matching the app's default landing view: always
+        // positioned along the ray from globe-center through the player and
+        // looking at globe-center. The player's own direction from center
+        // *is* the camera direction, so it always projects to screen center
+        // and moving it reads as the globe rotating underneath a fixed
+        // camera — no per-keypress reorientation like a chase cam would have.
+        camera.position.copy(player.position).normalize().multiplyScalar(camDist)
+        camera.up.set(0, 1, 0)
+        camera.lookAt(0, 0, 0)
 
         if (!ended) rafId = requestAnimationFrame(loop)
       }
