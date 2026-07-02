@@ -365,7 +365,13 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       const level = buildPacmanLevel(satellites, positions, getCoords, altToVisual, pacmanScope)
       if (!level) return // not enough Starlink data loaded yet
 
-      const player: PacmanActor = { position: level.playerSpawn.clone() }
+      const player: PacmanActor = {
+        position: level.playerSpawn.clone(),
+        // Cloned, not aliased — level.frame stays fixed at the level center
+        // for ghost waypoint sampling, while the player's own frame is
+        // carried forward (parallel-transported) as they move.
+        frame: { north: level.frame.north.clone(), east: level.frame.east.clone() },
+      }
       const ghosts: GhostActor[] = level.ghostSpawns.map(spawn => ({
         position: spawn.clone(),
         waypoint: spawn.clone(),
@@ -401,7 +407,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         const dt = Math.min((now - lastFrame) / 1000, 0.1)
         lastFrame = now
 
-        tickPacmanPlayer(player, keysRef.current, dt, worldRadius, level.shellRadius, level.frame)
+        tickPacmanPlayer(player, keysRef.current, dt, worldRadius, level.shellRadius)
         playerMesh.position.copy(player.position)
 
         const frightened = now < poweredUntil

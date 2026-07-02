@@ -11,9 +11,12 @@ export const POWER_DURATION_SEC = 7
 export const PLAYER_LIVES = 3
 export const GHOST_COLORS = ['#ef4444', '#f472b6', '#22d3ee', '#fb923c']
 
-// A fixed tangent-plane basis at the region center — screen-relative WASD
-// movement stays "up is up" everywhere in the (small) play region instead of
-// being relative to the player's own heading like the shuttle's free flight.
+// An orthonormal tangent-plane basis at some point on the shell. Used two
+// ways: as a one-off fixed frame anchored at the level center (for ghost
+// waypoint sampling), and as mutable per-actor state that gets carried
+// forward each tick (see PacmanActor below) — screen-relative WASD movement
+// stays "up is up" without being relative to the player's own heading like
+// the shuttle's free flight.
 export interface TangentFrame {
   north: THREE.Vector3
   east: THREE.Vector3
@@ -21,37 +24,62 @@ export interface TangentFrame {
 
 export function buildTangentFrame(center: THREE.Vector3): TangentFrame {
   const radial = center.clone().normalize()
-  const east = new THREE.Vector3(0, 1, 0).cross(radial).normalize()
+  // Near the poles, world-up is nearly parallel to radial and east would
+  // collapse toward zero — fall back to a different reference axis so the
+  // frame stays well-defined. This gets called every frame for player
+  // movement now, which can wander anywhere, including near-polar shells.
+  const worldUp = Math.abs(radial.y) > 0.999 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)
+  const east = worldUp.clone().cross(radial).normalize()
   const north = radial.clone().cross(east).normalize()
   return { north, east }
 }
 
 export interface PacmanActor {
   position: THREE.Vector3
+  // Carried tangent frame — rotated along with position each tick (parallel
+  // transport) rather than rebuilt from world-up every frame. Rebuilding
+  // from world-up has a coordinate singularity at the poles (the azimuth of
+  // "north" spins arbitrarily fast as you approach one), which trapped
+  // players in a loop near a pole instead of crossing it — very reachable in
+  // the All Starlink scope, since some Starlink shells are near-polar.
+  // Carrying the frame forward is exact and singularity-free everywhere, at
+  // the cost of "north" no longer meaning true-north after a long, winding
+  // path — an acceptable trade since it never gets stuck.
+  frame: TangentFrame
 }
 
 const _move = new THREE.Vector3()
+const _axis = new THREE.Vector3()
 
 // Hard-snapped to the shell (no free-flight drift) since precise maze-like
 // movement matters more here than the smooth momentum shuttlePhysics goes for.
+//
+// Movement is applied as an exact rotation of the position vector (and the
+// carried frame, to keep it tangent) rather than a tangent-plane offset — a
+// tangent-plane offset is only accurate near its anchor point; far away,
+// most of the step becomes a radial component that renormalizing back onto
+// the shell just discards, which is what made movement feel like it was
+// slowing to a crawl far from spawn (worst in the All Starlink scope).
 export function tickPacmanPlayer(
   actor: PacmanActor,
   keys: FlightKeyState,
   dt: number,
   worldRadius: number,
   shellRadius: number,
-  frame: TangentFrame,
 ): void {
   _move.set(0, 0, 0)
-  if (keys.forward) _move.addScaledVector(frame.north, 1)
-  if (keys.backward) _move.addScaledVector(frame.north, -1)
-  if (keys.strafeRight) _move.addScaledVector(frame.east, 1)
-  if (keys.strafeLeft) _move.addScaledVector(frame.east, -1)
+  if (keys.forward) _move.addScaledVector(actor.frame.north, 1)
+  if (keys.backward) _move.addScaledVector(actor.frame.north, -1)
+  if (keys.strafeRight) _move.addScaledVector(actor.frame.east, 1)
+  if (keys.strafeLeft) _move.addScaledVector(actor.frame.east, -1)
   if (_move.lengthSq() === 0) return
 
   _move.normalize()
-  actor.position.addScaledVector(_move, worldRadius * PLAYER_SPEED_FRAC * dt)
-  actor.position.setLength(shellRadius)
+  _axis.copy(_move).cross(actor.position).normalize()
+  const angle = (worldRadius * PLAYER_SPEED_FRAC * dt) / shellRadius
+  actor.position.applyAxisAngle(_axis, angle)
+  actor.frame.north.applyAxisAngle(_axis, angle)
+  actor.frame.east.applyAxisAngle(_axis, angle)
 }
 
 export type GhostMode = 'wander' | 'chase' | 'frightened'
@@ -68,22 +96,36 @@ export interface GhostActor {
 // real breathing room.
 const WANDER_MIN_FRAC = 0.4
 
+const _waypointTangent = new THREE.Vector3()
+const _waypointRadial = new THREE.Vector3()
+const _waypointAxis = new THREE.Vector3()
+
+// Picks a point genuinely `r` world-units (chord distance) from `center` in a
+// uniformly random bearing, however large `r` is, by rotating `center` by the
+// exact corresponding great-circle angle around a random tangent axis —
+// unlike a tangent-plane offset (center + r*north), which is only accurate
+// for small r and otherwise collapses waypoints toward a couple of fixed
+// directions instead of spreading across the play area (very visible once
+// extentRadius spans a large chunk of the shell, as in the All Starlink scope).
 export function pickWanderWaypoint(
   center: THREE.Vector3,
   frame: TangentFrame,
   extentRadius: number,
   shellRadius: number,
 ): THREE.Vector3 {
-  const angle = Math.random() * Math.PI * 2
   const minR = extentRadius * WANDER_MIN_FRAC
   // sqrt sampling over [minR, extentRadius] gives uniform-in-area coverage of
   // the annulus; plain linear random() would bias waypoints toward its inner
   // edge instead of spreading them evenly across the patrolled ring.
-  const r = Math.sqrt(minR * minR + Math.random() * (extentRadius * extentRadius - minR * minR))
-  return center.clone()
-    .addScaledVector(frame.north, Math.cos(angle) * r)
-    .addScaledVector(frame.east, Math.sin(angle) * r)
-    .setLength(shellRadius)
+  const r = Math.min(2 * shellRadius, Math.sqrt(minR * minR + Math.random() * (extentRadius * extentRadius - minR * minR)))
+  const travelAngle = 2 * Math.asin(r / (2 * shellRadius))
+
+  const bearing = Math.random() * Math.PI * 2
+  _waypointTangent.copy(frame.north).multiplyScalar(Math.cos(bearing)).addScaledVector(frame.east, Math.sin(bearing))
+  _waypointRadial.copy(center).normalize()
+  _waypointAxis.copy(_waypointTangent).cross(_waypointRadial).normalize()
+
+  return center.clone().applyAxisAngle(_waypointAxis, travelAngle)
 }
 
 const _dir = new THREE.Vector3()
