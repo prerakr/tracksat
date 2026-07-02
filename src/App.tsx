@@ -7,6 +7,9 @@ import { ScaleToggle } from './components/ScaleToggle'
 import { GameModeToggle } from './components/GameModeToggle'
 import { ShuttleHUD } from './components/ShuttleHUD'
 import type { ShuttleHUDHandle } from './components/ShuttleHUD'
+import { PacmanHUD } from './components/PacmanHUD'
+import type { PacmanHUDHandle } from './components/PacmanHUD'
+import { PacmanStartScreen } from './components/PacmanStartScreen'
 import { InfoPanel } from './components/InfoPanel'
 import { StatsBar } from './components/StatsBar'
 import { SearchBar } from './components/SearchBar'
@@ -17,7 +20,7 @@ import { useUserLocation } from './hooks/useUserLocation'
 import { computeGroundTrack } from './lib/groundTrack'
 import { ALL_CATEGORIES } from './lib/categories'
 import type { SatelliteRecord, SatPosition, ArcSegment, SatCategory } from './types/satellite'
-import type { ShuttleTelemetry, GameOverState } from './types/game'
+import type { ShuttleTelemetry, GameOverState, PacmanTelemetry, PacmanGameOverState, GameMode, PacmanScope } from './types/game'
 
 export default function App() {
   const { satellites, loading, error, lastFetch } = useSatellites()
@@ -30,17 +33,24 @@ export default function App() {
   const [activeCategories, setActiveCategories] = useState<Set<SatCategory>>(new Set(ALL_CATEGORIES))
   const [visibleZones, setVisibleZones] = useState<Set<string>>(new Set(ORBITAL_ZONES.map(z => z.name)))
   const [scaleMode, setScaleMode] = useState<ScaleMode>('compressed')
-  const [gameMode, setGameMode] = useState(false)
+  const [gameMode, setGameMode] = useState<GameMode>(null)
+  const [pacmanScope, setPacmanScope] = useState<PacmanScope | null>(null)
   const [gameOver, setGameOver] = useState<GameOverState | null>(null)
+  const [pacmanGameOver, setPacmanGameOver] = useState<PacmanGameOverState | null>(null)
   const [restartKey, setRestartKey] = useState(0)
   const hudRef = useRef<ShuttleHUDHandle>(null)
+  const pacmanHudRef = useRef<PacmanHUDHandle>(null)
 
-  const handleGameModeChange = useCallback((active: boolean) => {
-    setGameMode(active)
+  const handleGameModeChange = useCallback((mode: GameMode) => {
+    setGameMode(mode)
     setGameOver(null)
+    setPacmanGameOver(null)
+    // Always re-prompt for a play area on (re-)entering Pacman rather than
+    // reusing whatever was picked last session.
+    setPacmanScope(null)
     // True-scale spacing would make the game's play area essentially empty —
-    // force the shared frame the shuttle/obstacles rely on while flying.
-    if (active) setScaleMode('compressed')
+    // force the shared frame the shuttle/pacman/obstacles rely on while playing.
+    if (mode !== null) setScaleMode('compressed')
   }, [])
 
   const handleCollision = useCallback((survivedSec: number) => {
@@ -51,14 +61,24 @@ export default function App() {
     hudRef.current?.update(t)
   }, [])
 
+  const handlePacmanTelemetry = useCallback((t: PacmanTelemetry) => {
+    pacmanHudRef.current?.update(t)
+  }, [])
+
+  const handlePacmanGameOver = useCallback((s: PacmanGameOverState) => {
+    setPacmanGameOver(s)
+  }, [])
+
   const handleRestart = useCallback(() => {
     setGameOver(null)
+    setPacmanGameOver(null)
     setRestartKey(k => k + 1)
   }, [])
 
   const handleExitFromGameOver = useCallback(() => {
     setGameOver(null)
-    setGameMode(false)
+    setPacmanGameOver(null)
+    setGameMode(null)
   }, [])
 
   const toggleZone = useCallback((name: string) => {
@@ -134,21 +154,30 @@ export default function App() {
           visibleZones={visibleZones}
           scaleMode={scaleMode}
           gameMode={gameMode}
+          pacmanScope={pacmanScope}
           restartKey={restartKey}
           onSelectSat={handleSelectSat}
           onCollision={handleCollision}
           onTelemetry={handleTelemetry}
+          onPacmanTelemetry={handlePacmanTelemetry}
+          onPacmanGameOver={handlePacmanGameOver}
         />
       </div>
 
-      {gameMode && (
+      {gameMode === 'shuttle' && (
         <ShuttleHUD ref={hudRef} gameOver={gameOver} onRestart={handleRestart} onExit={handleExitFromGameOver} />
+      )}
+      {gameMode === 'pacman' && pacmanScope === null && (
+        <PacmanStartScreen onSelect={setPacmanScope} onExit={handleExitFromGameOver} />
+      )}
+      {gameMode === 'pacman' && pacmanScope !== null && (
+        <PacmanHUD ref={pacmanHudRef} gameOver={pacmanGameOver} onRestart={handleRestart} onExit={handleExitFromGameOver} />
       )}
 
       <div className="absolute bottom-6 left-4 z-20 flex flex-col gap-2">
-        {!gameMode && <ScaleToggle scaleMode={scaleMode} onChange={setScaleMode} />}
+        {gameMode === null && <ScaleToggle scaleMode={scaleMode} onChange={setScaleMode} />}
         <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
-        <GameModeToggle active={gameMode} onChange={handleGameModeChange} />
+        <GameModeToggle mode={gameMode} onChange={handleGameModeChange} />
       </div>
 
       {userLocation && (

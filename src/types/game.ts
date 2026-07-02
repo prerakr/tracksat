@@ -1,3 +1,6 @@
+export type GameMode = 'shuttle' | 'pacman' | null
+export type PacmanScope = 'region' | 'all'
+
 export interface ShuttleTelemetry {
   speedPct: number
   altitudeKm: number
@@ -7,4 +10,18 @@ export interface ShuttleTelemetry {
 
 export interface GameOverState {
   survivedSec: number
+}
+
+export interface PacmanTelemetry {
+  score: number
+  pelletsRemaining: number
+  pelletsTotal: number
+  lives: number
+  powered: boolean
+  powerRemainingSec: number
+}
+
+export interface PacmanGameOverState {
+  won: boolean
+  score: number
 }

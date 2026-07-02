@@ -2,13 +2,11 @@ import { useEffect, useMemo, useRef, useCallback } from 'react'
 import * as THREE from 'three'
 import type { SatelliteRecord, SatPosition } from '../types/satellite'
 import { buildSpatialGrid, queryNearbyIds } from '../lib/collision'
+import { scopeStarlinkBand } from '../lib/starlinkBand'
 
-// Real satellites are sparse enough (tens of km apart even in "crowded" LEO)
-// that true-to-life spacing rarely produces a near-miss. Starlink is the one
-// real cluster dense enough to be fun, so obstacles are scoped to a band
-// around its modal altitude and given an arcade-exaggerated collision radius —
-// positions themselves stay real TLE-derived data, nothing is fabricated.
-const ALTITUDE_BAND_KM = 50
+// Obstacles are scoped to Starlink's modal-altitude band (see starlinkBand.ts)
+// and given an arcade-exaggerated collision radius — positions themselves
+// stay real TLE-derived data, nothing is fabricated.
 const CELL_SIZE = 12 // world units
 const TICK_MS = 2000
 export const COLLISION_RADIUS = 3.2 // world units — several times the 0.5-unit dot geometry
@@ -34,15 +32,7 @@ export function useGameObstacles(
 ) {
   const scopedIds = useMemo(() => {
     if (!active) return new Set<string>()
-    const starlink = satellites.filter(s => s.category === 'starlink')
-    if (starlink.length === 0) return new Set<string>()
-    const midAltitudes = starlink.map(s => (s.apogee + s.perigee) / 2).sort((a, b) => a - b)
-    const modal = midAltitudes[Math.floor(midAltitudes.length / 2)]
-    const ids = new Set<string>()
-    for (const s of starlink) {
-      if (Math.abs((s.apogee + s.perigee) / 2 - modal) <= ALTITUDE_BAND_KM) ids.add(s.id)
-    }
-    return ids
+    return scopeStarlinkBand(satellites)
   }, [satellites, active])
 
   const prevTickRef = useRef<ObstacleTick | null>(null)

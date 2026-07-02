@@ -1,4 +1,4 @@
-import { useRef, useEffect, useMemo, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useRef, useEffect, useMemo, useCallback, useState, forwardRef, useImperativeHandle } from 'react'
 import Globe from 'react-globe.gl'
 import type { GlobeMethods } from 'react-globe.gl'
 import * as THREE from 'three'
@@ -9,7 +9,14 @@ import { useKeyboardInput } from '../hooks/useKeyboardInput'
 import { useShuttleFlight } from '../hooks/useShuttleFlight'
 import { tickShuttle, MAX_SPEED_FRAC } from '../lib/shuttlePhysics'
 import { useGameObstacles, COLLISION_RADIUS } from '../hooks/useGameObstacles'
-import type { ShuttleTelemetry } from '../types/game'
+import { buildPacmanLevel, queryPelletsNear } from '../lib/pacmanLevel'
+import type { Pellet } from '../lib/pacmanLevel'
+import {
+  tickPacmanPlayer, tickGhost, PELLET_EAT_RADIUS, GHOST_CATCH_RADIUS,
+  POWER_DURATION_SEC, PLAYER_LIVES, GHOST_COLORS,
+} from '../lib/pacmanPhysics'
+import type { PacmanActor, GhostActor } from '../lib/pacmanPhysics'
+import type { ShuttleTelemetry, PacmanTelemetry, PacmanGameOverState, GameMode, PacmanScope } from '../types/game'
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 interface PointDatum extends SatelliteRecord {
@@ -31,11 +38,14 @@ interface Props {
   userLocation: UserLocation | null
   visibleZones: Set<string>
   scaleMode: ScaleMode
-  gameMode: boolean
+  gameMode: GameMode
+  pacmanScope: PacmanScope | null
   restartKey: number
   onSelectSat: (sat: SatelliteRecord & SatPosition) => void
   onCollision: (survivedSec: number) => void
   onTelemetry: (t: ShuttleTelemetry) => void
+  onPacmanTelemetry: (t: PacmanTelemetry) => void
+  onPacmanGameOver: (s: PacmanGameOverState) => void
 }
 
 export type ScaleMode = 'compressed' | 'true'
@@ -91,9 +101,21 @@ const _shuttleGeo = new THREE.ConeGeometry(1.5, 5, 8)
 _shuttleGeo.rotateX(-Math.PI / 2)
 const _shuttleMat = new THREE.MeshBasicMaterial({ color: '#f8fafc' })
 
+// Pacman + ghost meshes — geometry shared/never disposed like the shuttle's;
+// ghost materials are created per-session (need live frighten-tint updates)
+// and disposed on session cleanup. Sized against the 0.5-radius satellite
+// dots for legibility at the same full-globe zoom the game camera uses.
+const _pacmanGeo = new THREE.SphereGeometry(1.4, 12, 8)
+const _pacmanMat = new THREE.MeshBasicMaterial({ color: '#facc15' })
+const _ghostGeo = new THREE.SphereGeometry(1.1, 10, 8)
+const _frightenedColor = new THREE.Color('#1d4ed8')
+
 const GAME_SPAWN_ALT_KM = 550 // Starlink shell
 const GAME_CHASE_DISTANCE = 10
 const GAME_CHASE_HEIGHT = 3
+// Matches globe.gl's own default landing altitude (2.5 globe-radii above the
+// surface) — the game camera never leaves this full-globe framing.
+const PACMAN_CAM_ALTITUDE = 2.5
 
 export const ORBITAL_ZONES = [
   { name: 'LEO', altKm: 2_000,  color: '#60a5fa', label: '160 – 2,000 km' },
@@ -102,30 +124,35 @@ export const ORBITAL_ZONES = [
 ] as const
 
 export const GlobeView = forwardRef<GlobeViewHandle, Props>(
-  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, gameMode, restartKey, onSelectSat, onCollision, onTelemetry }, ref) {
+  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, gameMode, pacmanScope, restartKey, onSelectSat, onCollision, onTelemetry, onPacmanTelemetry, onPacmanGameOver }, ref) {
     const globeRef = useRef<GlobeMethods | undefined>(undefined)
     const orbitLineRef = useRef<THREE.Line | null>(null)
     const zoneShellsRef = useRef<THREE.Group[]>([])
     const altToVisual = scaleMode === 'true' ? altToVisualTrueScale : altToVisualCompressed
 
-    const keysRef = useKeyboardInput(gameMode)
+    const keysRef = useKeyboardInput(gameMode !== null)
     const { stateRef: shuttleStateRef, reset: resetShuttle } = useShuttleFlight()
+    const [pacmanPellets, setPacmanPellets] = useState<Pellet[]>([])
 
     const getCoords = useCallback((lat: number, lng: number, altVisual: number) => {
       const globe = globeRef.current
       return globe ? globe.getCoords(lat, lng, altVisual) : { x: 0, y: 0, z: 0 }
     }, [])
     const { getNearestObstacle, reset: resetObstacles } = useGameObstacles(
-      satellites, positions, getCoords, altToVisual, gameMode
+      satellites, positions, getCoords, altToVisual, gameMode === 'shuttle'
     )
 
-    // Latest-callback refs so the game-loop effect doesn't need to re-run
-    // (and re-spawn the shuttle) every time a parent re-render passes new
-    // inline function props — same pattern as visibleZonesRef below.
+    // Latest-callback refs so the game-loop effects don't need to re-run
+    // (and re-spawn the shuttle/level) every time a parent re-render passes
+    // new inline function props — same pattern as visibleZonesRef below.
     const onCollisionRef = useRef(onCollision)
     onCollisionRef.current = onCollision
     const onTelemetryRef = useRef(onTelemetry)
     onTelemetryRef.current = onTelemetry
+    const onPacmanTelemetryRef = useRef(onPacmanTelemetry)
+    onPacmanTelemetryRef.current = onPacmanTelemetry
+    const onPacmanGameOverRef = useRef(onPacmanGameOver)
+    onPacmanGameOverRef.current = onPacmanGameOver
 
     // Read via ref inside buildZones so toggling zone visibility doesn't force
     // a full geometry rebuild — only a scale-mode change (altToVisual) should.
@@ -220,10 +247,10 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
     // from its own spherical/target state on every call, and three-globe's
     // internal render loop calls it every frame regardless of `enabled` — so
     // `enabled = false` alone isn't enough, update() itself has to be
-    // neutralized or it will stomp the shuttle-driven camera each frame.
+    // neutralized or it will stomp the game-driven camera each frame.
     useEffect(() => {
       const globe = globeRef.current
-      if (!globe || !gameMode) return
+      if (!globe || gameMode === null) return
 
       const controls = globe.controls() as OrbitControls
       const priorPov = globe.pointOfView()
@@ -245,7 +272,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
     // as well as on initial entry, without touching the controls takeover above.
     useEffect(() => {
       const globe = globeRef.current
-      if (!globe || !gameMode) return
+      if (!globe || gameMode !== 'shuttle') return
 
       const camera = globe.camera()
       const scene = globe.scene()
@@ -322,6 +349,156 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       }
     }, [gameMode, restartKey, altToVisual, resetShuttle, resetObstacles, getNearestObstacle, keysRef, shuttleStateRef])
 
+    // Pacman spawn + game loop. `satellites`/`positions` are deliberately
+    // omitted from the deps array: the level is a one-time snapshot taken
+    // when the session starts (entry or restartKey bump), not a live feed —
+    // including them would silently regenerate the whole board every time
+    // the propagator ticks.
+    useEffect(() => {
+      const globe = globeRef.current
+      if (!globe || gameMode !== 'pacman' || pacmanScope === null) return
+
+      const camera = globe.camera()
+      const scene = globe.scene()
+      const worldRadius = globe.getGlobeRadius()
+
+      const level = buildPacmanLevel(satellites, positions, getCoords, altToVisual, pacmanScope)
+      if (!level) return // not enough Starlink data loaded yet
+
+      const player: PacmanActor = {
+        position: level.playerSpawn.clone(),
+        // Cloned, not aliased — level.frame stays fixed at the level center
+        // for ghost waypoint sampling, while the player's own frame is
+        // carried forward (parallel-transported) as they move.
+        frame: { north: level.frame.north.clone(), east: level.frame.east.clone() },
+      }
+      const ghosts: GhostActor[] = level.ghostSpawns.map(spawn => ({
+        position: spawn.clone(),
+        waypoint: spawn.clone(),
+        mode: 'wander',
+      }))
+
+      const eaten = new Set<string>()
+      let score = 0
+      let lives = PLAYER_LIVES
+      let poweredUntil = 0
+      let invulnUntil = performance.now() + 2500
+      let ended = false
+
+      setPacmanPellets(Array.from(level.pellets.values()))
+
+      const playerMesh = new THREE.Mesh(_pacmanGeo, _pacmanMat)
+      playerMesh.position.copy(player.position)
+      scene.add(playerMesh)
+
+      const ghostMats = ghosts.map((_, i) => new THREE.MeshBasicMaterial({ color: GHOST_COLORS[i % GHOST_COLORS.length] }))
+      const ghostMeshes = ghosts.map((g, i) => {
+        const mesh = new THREE.Mesh(_ghostGeo, ghostMats[i])
+        mesh.position.copy(g.position)
+        scene.add(mesh)
+        return mesh
+      })
+
+      let rafId = 0
+      let lastFrame = performance.now()
+      const camDist = worldRadius * (1 + PACMAN_CAM_ALTITUDE)
+
+      const loop = (now: number) => {
+        const dt = Math.min((now - lastFrame) / 1000, 0.1)
+        lastFrame = now
+
+        tickPacmanPlayer(player, keysRef.current, dt, worldRadius, level.shellRadius)
+        playerMesh.position.copy(player.position)
+
+        const frightened = now < poweredUntil
+        for (let i = 0; i < ghosts.length; i++) {
+          tickGhost(ghosts[i], player.position, level.center, level.frame, level.extentRadius, frightened, dt, worldRadius, level.shellRadius)
+          ghostMeshes[i].position.copy(ghosts[i].position)
+          ghostMats[i].color.set(frightened ? _frightenedColor : GHOST_COLORS[i % GHOST_COLORS.length])
+        }
+
+        let ateSomething = false
+        for (const pellet of queryPelletsNear(level, player.position, PELLET_EAT_RADIUS)) {
+          if (eaten.has(pellet.id)) continue
+          eaten.add(pellet.id)
+          ateSomething = true
+          if (pellet.power) {
+            poweredUntil = now + POWER_DURATION_SEC * 1000
+            score += 50
+          } else {
+            score += 10
+          }
+        }
+        if (ateSomething) {
+          setPacmanPellets(prev => prev.filter(p => !eaten.has(p.id)))
+        }
+
+        if (!ended && now > invulnUntil) {
+          for (let i = 0; i < ghosts.length; i++) {
+            if (ghosts[i].position.distanceTo(player.position) > GHOST_CATCH_RADIUS) continue
+            if (now < poweredUntil) {
+              score += 200
+              ghosts[i].position.copy(level.ghostSpawns[i])
+              ghosts[i].waypoint.copy(level.ghostSpawns[i])
+              ghosts[i].mode = 'wander'
+            } else {
+              lives -= 1
+              invulnUntil = now + 2000
+              player.position.copy(level.playerSpawn)
+              // Send the catching ghost home too — otherwise it sits right on
+              // the player's respawn point and the next life is lost for free.
+              ghosts[i].position.copy(level.ghostSpawns[i])
+              ghosts[i].waypoint.copy(level.ghostSpawns[i])
+              ghosts[i].mode = 'wander'
+              if (lives <= 0) {
+                ended = true
+                onPacmanGameOverRef.current({ won: false, score })
+              }
+            }
+            break
+          }
+        }
+
+        const pelletsRemaining = level.pellets.size - eaten.size
+        onPacmanTelemetryRef.current({
+          score,
+          pelletsRemaining,
+          pelletsTotal: level.pellets.size,
+          lives,
+          powered: now < poweredUntil,
+          powerRemainingSec: Math.max(0, (poweredUntil - now) / 1000),
+        })
+
+        if (!ended && pelletsRemaining === 0) {
+          ended = true
+          onPacmanGameOverRef.current({ won: true, score })
+        }
+
+        // Full-globe camera, matching the app's default landing view: always
+        // positioned along the ray from globe-center through the player and
+        // looking at globe-center. The player's own direction from center
+        // *is* the camera direction, so it always projects to screen center
+        // and moving it reads as the globe rotating underneath a fixed
+        // camera — no per-keypress reorientation like a chase cam would have.
+        camera.position.copy(player.position).normalize().multiplyScalar(camDist)
+        camera.up.set(0, 1, 0)
+        camera.lookAt(0, 0, 0)
+
+        if (!ended) rafId = requestAnimationFrame(loop)
+      }
+      rafId = requestAnimationFrame(loop)
+
+      return () => {
+        cancelAnimationFrame(rafId)
+        scene.remove(playerMesh)
+        for (let i = 0; i < ghostMeshes.length; i++) {
+          scene.remove(ghostMeshes[i])
+          ghostMats[i].dispose()
+        }
+        setPacmanPellets([])
+      }
+    }, [gameMode, pacmanScope, restartKey, altToVisual, getCoords, keysRef])
+
     useEffect(() => {
       return () => {
         const globe = globeRef.current
@@ -378,6 +555,8 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       }
     }, [groundTrack, altToVisual])
 
+    const satById = useMemo(() => new Map(satellites.map(s => [s.id, s])), [satellites])
+
     const pointsData = useMemo<PointDatum[]>(() => {
       const result: PointDatum[] = []
       for (const sat of satellites) {
@@ -388,6 +567,22 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       }
       return result
     }, [satellites, positions, activeCategories])
+
+    // Pacman renders frozen pellet snapshots (not live `positions`) through the
+    // same instanced dot layer — power pellets get a distinct color.
+    const pacmanPointsData = useMemo<PointDatum[]>(() => {
+      const result: PointDatum[] = []
+      for (const pellet of pacmanPellets) {
+        const sat = satById.get(pellet.id)
+        if (!sat) continue
+        result.push({
+          ...sat,
+          lat: pellet.lat, lng: pellet.lng, alt: pellet.alt, velocity: 0,
+          color: pellet.power ? '#fde047' : sat.color,
+        })
+      }
+      return result
+    }, [pacmanPellets, satById])
 
     const locationRings = useMemo(
       () => (userLocation ? [userLocation] : []),
@@ -407,7 +602,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         ref={globeRef}
         globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
         backgroundImageUrl="//unpkg.com/three-globe/example/img/night-sky.png"
-        customLayerData={pointsData}
+        customLayerData={gameMode === 'pacman' ? pacmanPointsData : pointsData}
         customThreeObject={(d: object) => {
           const p = d as PointDatum
           return new THREE.Mesh(_satGeo, getMat(p.color))
