@@ -1,12 +1,12 @@
 import * as THREE from 'three'
 import type { FlightKeyState } from '../hooks/useKeyboardInput'
 
-export const PLAYER_SPEED_FRAC = 0.11 // fraction of world radius per second
-export const GHOST_SPEED_FRAC = 0.07
-export const GHOST_FRIGHTENED_SPEED_FRAC = 0.045
-export const GHOST_AGGRO_RADIUS = 9 // world units
-export const PELLET_EAT_RADIUS = 2.5
-export const GHOST_CATCH_RADIUS = 3
+export const PLAYER_SPEED_FRAC = 0.24 // fraction of world radius per second
+export const GHOST_SPEED_FRAC = 0.16
+export const GHOST_FRIGHTENED_SPEED_FRAC = 0.1
+export const GHOST_AGGRO_RADIUS = 11 // world units
+export const PELLET_EAT_RADIUS = 3
+export const GHOST_CATCH_RADIUS = 3.5
 export const POWER_DURATION_SEC = 7
 export const PLAYER_LIVES = 3
 export const GHOST_COLORS = ['#ef4444', '#f472b6', '#22d3ee', '#fb923c']
@@ -62,23 +62,24 @@ export interface GhostActor {
   mode: GhostMode
 }
 
-// Wander waypoints stay in the region's outer annulus (never the inner 40%)
-// so ghost patrol paths don't sweep back through the player's spawn point at
-// the region center — the player spawns there and needs real breathing room.
+// Wander waypoints stay in the play area's outer annulus (never the inner
+// 40% of extentRadius) so ghost patrol paths don't sweep back through the
+// player's spawn point at the center — the player spawns there and needs
+// real breathing room.
 const WANDER_MIN_FRAC = 0.4
 
 export function pickWanderWaypoint(
   center: THREE.Vector3,
   frame: TangentFrame,
-  regionRadius: number,
+  extentRadius: number,
   shellRadius: number,
 ): THREE.Vector3 {
   const angle = Math.random() * Math.PI * 2
-  const minR = regionRadius * WANDER_MIN_FRAC
-  // sqrt sampling over [minR, regionRadius] gives uniform-in-area coverage of
+  const minR = extentRadius * WANDER_MIN_FRAC
+  // sqrt sampling over [minR, extentRadius] gives uniform-in-area coverage of
   // the annulus; plain linear random() would bias waypoints toward its inner
   // edge instead of spreading them evenly across the patrolled ring.
-  const r = Math.sqrt(minR * minR + Math.random() * (regionRadius * regionRadius - minR * minR))
+  const r = Math.sqrt(minR * minR + Math.random() * (extentRadius * extentRadius - minR * minR))
   return center.clone()
     .addScaledVector(frame.north, Math.cos(angle) * r)
     .addScaledVector(frame.east, Math.sin(angle) * r)
@@ -97,7 +98,7 @@ export function tickGhost(
   playerPos: THREE.Vector3,
   center: THREE.Vector3,
   frame: TangentFrame,
-  regionRadius: number,
+  extentRadius: number,
   frightened: boolean,
   dt: number,
   worldRadius: number,
@@ -113,7 +114,7 @@ export function tickGhost(
     _dir.copy(playerPos).sub(ghost.position)
   } else {
     if (ghost.position.distanceTo(ghost.waypoint) < 2) {
-      ghost.waypoint = pickWanderWaypoint(center, frame, regionRadius, shellRadius)
+      ghost.waypoint = pickWanderWaypoint(center, frame, extentRadius, shellRadius)
     }
     _dir.copy(ghost.waypoint).sub(ghost.position)
   }

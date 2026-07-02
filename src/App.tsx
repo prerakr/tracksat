@@ -9,6 +9,7 @@ import { ShuttleHUD } from './components/ShuttleHUD'
 import type { ShuttleHUDHandle } from './components/ShuttleHUD'
 import { PacmanHUD } from './components/PacmanHUD'
 import type { PacmanHUDHandle } from './components/PacmanHUD'
+import { PacmanStartScreen } from './components/PacmanStartScreen'
 import { InfoPanel } from './components/InfoPanel'
 import { StatsBar } from './components/StatsBar'
 import { SearchBar } from './components/SearchBar'
@@ -19,7 +20,7 @@ import { useUserLocation } from './hooks/useUserLocation'
 import { computeGroundTrack } from './lib/groundTrack'
 import { ALL_CATEGORIES } from './lib/categories'
 import type { SatelliteRecord, SatPosition, ArcSegment, SatCategory } from './types/satellite'
-import type { ShuttleTelemetry, GameOverState, PacmanTelemetry, PacmanGameOverState, GameMode } from './types/game'
+import type { ShuttleTelemetry, GameOverState, PacmanTelemetry, PacmanGameOverState, GameMode, PacmanScope } from './types/game'
 
 export default function App() {
   const { satellites, loading, error, lastFetch } = useSatellites()
@@ -33,6 +34,7 @@ export default function App() {
   const [visibleZones, setVisibleZones] = useState<Set<string>>(new Set(ORBITAL_ZONES.map(z => z.name)))
   const [scaleMode, setScaleMode] = useState<ScaleMode>('compressed')
   const [gameMode, setGameMode] = useState<GameMode>(null)
+  const [pacmanScope, setPacmanScope] = useState<PacmanScope | null>(null)
   const [gameOver, setGameOver] = useState<GameOverState | null>(null)
   const [pacmanGameOver, setPacmanGameOver] = useState<PacmanGameOverState | null>(null)
   const [restartKey, setRestartKey] = useState(0)
@@ -43,6 +45,9 @@ export default function App() {
     setGameMode(mode)
     setGameOver(null)
     setPacmanGameOver(null)
+    // Always re-prompt for a play area on (re-)entering Pacman rather than
+    // reusing whatever was picked last session.
+    setPacmanScope(null)
     // True-scale spacing would make the game's play area essentially empty —
     // force the shared frame the shuttle/pacman/obstacles rely on while playing.
     if (mode !== null) setScaleMode('compressed')
@@ -149,6 +154,7 @@ export default function App() {
           visibleZones={visibleZones}
           scaleMode={scaleMode}
           gameMode={gameMode}
+          pacmanScope={pacmanScope}
           restartKey={restartKey}
           onSelectSat={handleSelectSat}
           onCollision={handleCollision}
@@ -161,7 +167,10 @@ export default function App() {
       {gameMode === 'shuttle' && (
         <ShuttleHUD ref={hudRef} gameOver={gameOver} onRestart={handleRestart} onExit={handleExitFromGameOver} />
       )}
-      {gameMode === 'pacman' && (
+      {gameMode === 'pacman' && pacmanScope === null && (
+        <PacmanStartScreen onSelect={setPacmanScope} onExit={handleExitFromGameOver} />
+      )}
+      {gameMode === 'pacman' && pacmanScope !== null && (
         <PacmanHUD ref={pacmanHudRef} gameOver={pacmanGameOver} onRestart={handleRestart} onExit={handleExitFromGameOver} />
       )}
 

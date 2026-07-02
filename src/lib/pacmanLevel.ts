@@ -1,14 +1,16 @@
 import * as THREE from 'three'
 import type { SatelliteRecord, SatPosition } from '../types/satellite'
+import type { PacmanScope } from '../types/game'
 import { scopeStarlinkBand } from './starlinkBand'
 import { buildSpatialGrid, queryNearbyIds } from './collision'
 import { buildTangentFrame } from './pacmanPhysics'
 import type { TangentFrame } from './pacmanPhysics'
 
-export const REGION_RADIUS = 25 // world units — roughly a 1,500km-wide patch of the Starlink shell
+export const REGION_RADIUS = 45 // world units — roughly a 2,700km-wide patch of the Starlink shell
 const GRID_CELL = 8
-const POWER_PELLET_COUNT = 4
-export const GHOST_COUNT = 4
+const POWER_PELLET_COUNT = 6
+const GHOST_COUNT_REGION = 4
+const GHOST_COUNT_ALL = 9
 const MIN_PELLETS = 6
 
 export interface Pellet {
@@ -24,22 +26,25 @@ export interface PacmanLevel {
   center: THREE.Vector3
   frame: TangentFrame
   shellRadius: number
+  extentRadius: number // furthest pellet from center — bounds ghost wander, scales with scope
   pellets: Map<string, Pellet>
   grid: Map<string, string[]>
   ghostSpawns: THREE.Vector3[]
   playerSpawn: THREE.Vector3
 }
 
-// Snapshots a random patch of the live Starlink band into a static level:
-// one satellite becomes the region center, everything else within
-// REGION_RADIUS becomes a pellet frozen at its current position. Positions
-// are captured once here and never touched again — this is what makes the
-// mode a "stationary" pacman board rather than a live tracker.
+// Snapshots the live Starlink band into a static level: one satellite
+// becomes the play-area center, and either everything within REGION_RADIUS
+// of it ('region') or every Starlink satellite in the band ('all') becomes
+// a pellet frozen at its current position. Positions are captured once here
+// and never touched again — this is what makes the mode a "stationary"
+// pacman board rather than a live tracker.
 export function buildPacmanLevel(
   satellites: SatelliteRecord[],
   positions: Map<string, SatPosition>,
   getCoords: (lat: number, lng: number, altVisual: number) => { x: number; y: number; z: number },
   altToVisual: (altKm: number) => number,
+  scope: PacmanScope,
 ): PacmanLevel | null {
   const bandIds = scopeStarlinkBand(satellites)
   const candidates = satellites.filter(s => bandIds.has(s.id) && positions.has(s.id))
@@ -57,15 +62,19 @@ export function buildPacmanLevel(
     const pos = positions.get(sat.id)!
     const c = getCoords(pos.lat, pos.lng, altToVisual(pos.alt))
     const p = new THREE.Vector3(c.x, c.y, c.z)
-    if (p.distanceTo(center) > REGION_RADIUS) continue
+    if (scope === 'region' && p.distanceTo(center) > REGION_RADIUS) continue
     pellets.set(sat.id, { id: sat.id, position: p, lat: pos.lat, lng: pos.lng, alt: pos.alt, power: false })
   }
   if (pellets.size < MIN_PELLETS) return null
 
-  // Mark the furthest-out pellets as power pellets — rewards exploring the
-  // whole region instead of camping the center.
+  // Sorted furthest-first: powers the power-pellet placement below and the
+  // ghost-spawn spread, and its head gives the play area's true extent.
   const byDistance = Array.from(pellets.values())
     .sort((a, b) => b.position.distanceTo(center) - a.position.distanceTo(center))
+  const extentRadius = scope === 'region' ? REGION_RADIUS : byDistance[0].position.distanceTo(center)
+
+  // Mark the furthest-out pellets as power pellets — rewards exploring the
+  // whole play area instead of camping the center.
   for (let i = 0; i < Math.min(POWER_PELLET_COUNT, byDistance.length); i++) byDistance[i].power = true
 
   const grid = buildSpatialGrid(
@@ -73,17 +82,20 @@ export function buildPacmanLevel(
     GRID_CELL,
   )
 
+  // Ghost spawns are sampled from the real pellet field itself (evenly across
+  // the furthest-to-nearest spread, skipping the closest 5% so none spawns
+  // right on top of the player) rather than a geometric ring — this scales
+  // correctly whether the play area is a tight region or the whole band.
+  const ghostCount = scope === 'region' ? GHOST_COUNT_REGION : GHOST_COUNT_ALL
+  const poolStart = Math.floor(byDistance.length * 0.05)
+  const poolSpan = Math.max(1, byDistance.length - poolStart)
   const ghostSpawns: THREE.Vector3[] = []
-  for (let i = 0; i < GHOST_COUNT; i++) {
-    const angle = (i / GHOST_COUNT) * Math.PI * 2
-    const spawn = center.clone()
-      .addScaledVector(frame.north, Math.cos(angle) * REGION_RADIUS * 0.8)
-      .addScaledVector(frame.east, Math.sin(angle) * REGION_RADIUS * 0.8)
-      .setLength(shellRadius)
-    ghostSpawns.push(spawn)
+  for (let i = 0; i < ghostCount; i++) {
+    const idx = Math.min(byDistance.length - 1, poolStart + Math.floor((i / ghostCount) * poolSpan))
+    ghostSpawns.push(byDistance[idx].position.clone())
   }
 
-  return { center, frame, shellRadius, pellets, grid, ghostSpawns, playerSpawn: center.clone() }
+  return { center, frame, shellRadius, extentRadius, pellets, grid, ghostSpawns, playerSpawn: center.clone() }
 }
 
 export function queryPelletsNear(level: PacmanLevel, position: THREE.Vector3, radius: number): Pellet[] {

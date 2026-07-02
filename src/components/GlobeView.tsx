@@ -9,14 +9,14 @@ import { useKeyboardInput } from '../hooks/useKeyboardInput'
 import { useShuttleFlight } from '../hooks/useShuttleFlight'
 import { tickShuttle, MAX_SPEED_FRAC } from '../lib/shuttlePhysics'
 import { useGameObstacles, COLLISION_RADIUS } from '../hooks/useGameObstacles'
-import { buildPacmanLevel, queryPelletsNear, REGION_RADIUS } from '../lib/pacmanLevel'
+import { buildPacmanLevel, queryPelletsNear } from '../lib/pacmanLevel'
 import type { Pellet } from '../lib/pacmanLevel'
 import {
   tickPacmanPlayer, tickGhost, PELLET_EAT_RADIUS, GHOST_CATCH_RADIUS,
   POWER_DURATION_SEC, PLAYER_LIVES, GHOST_COLORS,
 } from '../lib/pacmanPhysics'
 import type { PacmanActor, GhostActor } from '../lib/pacmanPhysics'
-import type { ShuttleTelemetry, PacmanTelemetry, PacmanGameOverState, GameMode } from '../types/game'
+import type { ShuttleTelemetry, PacmanTelemetry, PacmanGameOverState, GameMode, PacmanScope } from '../types/game'
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 interface PointDatum extends SatelliteRecord {
@@ -39,6 +39,7 @@ interface Props {
   visibleZones: Set<string>
   scaleMode: ScaleMode
   gameMode: GameMode
+  pacmanScope: PacmanScope | null
   restartKey: number
   onSelectSat: (sat: SatelliteRecord & SatPosition) => void
   onCollision: (survivedSec: number) => void
@@ -123,7 +124,7 @@ export const ORBITAL_ZONES = [
 ] as const
 
 export const GlobeView = forwardRef<GlobeViewHandle, Props>(
-  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, gameMode, restartKey, onSelectSat, onCollision, onTelemetry, onPacmanTelemetry, onPacmanGameOver }, ref) {
+  function GlobeView({ satellites, positions, activeCategories, groundTrack, userLocation, visibleZones, scaleMode, gameMode, pacmanScope, restartKey, onSelectSat, onCollision, onTelemetry, onPacmanTelemetry, onPacmanGameOver }, ref) {
     const globeRef = useRef<GlobeMethods | undefined>(undefined)
     const orbitLineRef = useRef<THREE.Line | null>(null)
     const zoneShellsRef = useRef<THREE.Group[]>([])
@@ -355,13 +356,13 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
     // the propagator ticks.
     useEffect(() => {
       const globe = globeRef.current
-      if (!globe || gameMode !== 'pacman') return
+      if (!globe || gameMode !== 'pacman' || pacmanScope === null) return
 
       const camera = globe.camera()
       const scene = globe.scene()
       const worldRadius = globe.getGlobeRadius()
 
-      const level = buildPacmanLevel(satellites, positions, getCoords, altToVisual)
+      const level = buildPacmanLevel(satellites, positions, getCoords, altToVisual, pacmanScope)
       if (!level) return // not enough Starlink data loaded yet
 
       const player: PacmanActor = { position: level.playerSpawn.clone() }
@@ -405,7 +406,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
 
         const frightened = now < poweredUntil
         for (let i = 0; i < ghosts.length; i++) {
-          tickGhost(ghosts[i], player.position, level.center, level.frame, REGION_RADIUS, frightened, dt, worldRadius, level.shellRadius)
+          tickGhost(ghosts[i], player.position, level.center, level.frame, level.extentRadius, frightened, dt, worldRadius, level.shellRadius)
           ghostMeshes[i].position.copy(ghosts[i].position)
           ghostMats[i].color.set(frightened ? _frightenedColor : GHOST_COLORS[i % GHOST_COLORS.length])
         }
@@ -490,7 +491,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         }
         setPacmanPellets([])
       }
-    }, [gameMode, restartKey, altToVisual, getCoords, keysRef])
+    }, [gameMode, pacmanScope, restartKey, altToVisual, getCoords, keysRef])
 
     useEffect(() => {
       return () => {

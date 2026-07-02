@@ -1,4 +1,5 @@
 export type GameMode = 'shuttle' | 'pacman' | null
+export type PacmanScope = 'region' | 'all'
 
 export interface ShuttleTelemetry {
   speedPct: number
