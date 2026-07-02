@@ -6,6 +6,9 @@ import type { SatelliteRecord, SatPosition, ArcSegment } from '../types/satellit
 import type { SatCategory } from '../types/satellite'
 import type { UserLocation } from '../hooks/useUserLocation'
 import { useKeyboardInput } from '../hooks/useKeyboardInput'
+import type { FlightKeyState } from '../hooks/useKeyboardInput'
+import { useTouchJoystick } from '../hooks/useTouchJoystick'
+import { TouchJoystick } from './TouchJoystick'
 import { useShuttleFlight } from '../hooks/useShuttleFlight'
 import { tickShuttle, MAX_SPEED_FRAC } from '../lib/shuttlePhysics'
 import { useGameObstacles, COLLISION_RADIUS } from '../hooks/useGameObstacles'
@@ -112,6 +115,23 @@ const _pacmanMat = new THREE.MeshBasicMaterial({ color: '#facc15' })
 const _ghostGeo = new THREE.SphereGeometry(1.1, 10, 8)
 const _frightenedColor = new THREE.Color('#1d4ed8')
 
+// Collapses keyboard WASD booleans and an analog touch-joystick vector into
+// the single east/north direction tickPacmanPlayer rotates by — keyboard
+// contributes unit steps per held key (so opposite keys cancel and diagonals
+// come out at unit-ish magnitude, same as before touch support existed),
+// the joystick just adds its own already-deadzoned x/y on top. Only the
+// resulting direction matters; tickPacmanPlayer normalizes it and moves at
+// a fixed speed, so magnitude here doesn't need to be clamped to 1.
+function pacmanMoveVector(keys: FlightKeyState, joystick: { x: number; y: number }): [number, number] {
+  let x = joystick.x
+  let y = joystick.y
+  if (keys.forward) y += 1
+  if (keys.backward) y -= 1
+  if (keys.strafeRight) x += 1
+  if (keys.strafeLeft) x -= 1
+  return [x, y]
+}
+
 const GAME_SPAWN_ALT_KM = 550 // Starlink shell
 const GAME_CHASE_DISTANCE = 10
 const GAME_CHASE_HEIGHT = 3
@@ -133,6 +153,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
     const altToVisual = scaleMode === 'true' ? altToVisualTrueScale : altToVisualCompressed
 
     const keysRef = useKeyboardInput(gameMode !== null)
+    const joystick = useTouchJoystick(gameMode === 'pacman' && pacmanScope !== null)
     const { stateRef: shuttleStateRef, reset: resetShuttle } = useShuttleFlight()
     const [pacmanPellets, setPacmanPellets] = useState<Pellet[]>([])
 
@@ -419,7 +440,8 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         const dt = Math.min((now - lastFrame) / 1000, 0.1)
         lastFrame = now
 
-        tickPacmanPlayer(player, keysRef.current, dt, worldRadius, level.shellRadius)
+        const [moveX, moveY] = pacmanMoveVector(keysRef.current, joystick.vectorRef.current)
+        tickPacmanPlayer(player, moveX, moveY, dt, worldRadius, level.shellRadius)
         playerMesh.position.copy(player.position)
 
         const frightened = now < poweredUntil
@@ -525,7 +547,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         }
         setPacmanPellets([])
       }
-    }, [gameMode, pacmanScope, restartKey, altToVisual, getCoords, keysRef])
+    }, [gameMode, pacmanScope, restartKey, altToVisual, getCoords, keysRef, joystick.vectorRef])
 
     useEffect(() => {
       return () => {
@@ -626,42 +648,52 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
     }, [onSelectSat])
 
     return (
-      <Globe
-        ref={globeRef}
-        globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
-        backgroundImageUrl="//unpkg.com/three-globe/example/img/night-sky.png"
-        customLayerData={gameMode === 'pacman' ? pacmanPointsData : pointsData}
-        customThreeObject={(d: object) => {
-          const p = d as PointDatum
-          return new THREE.Mesh(_satGeo, getMat(p.color))
-        }}
-        customThreeObjectUpdate={(obj, d: object) => {
-          const p = d as PointDatum
-          const coords = globeRef.current?.getCoords(p.lat, p.lng, altToVisual(p.alt))
-          if (coords) obj.position.set(coords.x, coords.y, coords.z)
-        }}
-        customLayerLabel={(d: object) => {
-          const p = d as PointDatum
-          return `<div style="font-family:monospace;background:#0f172a;color:#e2e8f0;padding:6px 10px;border-radius:6px;font-size:12px;border:1px solid #334155">
-            <div style="font-weight:bold;color:#38bdf8">${p.name}</div>
-            <div>NORAD: ${p.id}</div>
-            <div>Alt: ${p.alt.toFixed(0)} km</div>
-            <div>Vel: ${p.velocity.toFixed(2)} km/s</div>
-          </div>`
-        }}
-        onCustomLayerClick={(obj: object) => handleCustomClick(obj)}
-        onGlobeReady={buildZones}
-        ringsData={locationRings}
-        ringLat="lat"
-        ringLng="lng"
-        ringColor={() => (t: number) => `rgba(96,165,250,${1 - t})`}
-        ringMaxRadius={4}
-        ringPropagationSpeed={1.5}
-        ringRepeatPeriod={1800}
-        ringAltitude={0.001}
-        width={window.innerWidth}
-        height={window.innerHeight}
-      />
+      <>
+        {gameMode === 'pacman' && pacmanScope !== null && (
+          <TouchJoystick
+            knobRef={joystick.knobRef}
+            onTouchStart={joystick.onTouchStart}
+            onTouchMove={joystick.onTouchMove}
+            onTouchEnd={joystick.onTouchEnd}
+          />
+        )}
+        <Globe
+          ref={globeRef}
+          globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
+          backgroundImageUrl="//unpkg.com/three-globe/example/img/night-sky.png"
+          customLayerData={gameMode === 'pacman' ? pacmanPointsData : pointsData}
+          customThreeObject={(d: object) => {
+            const p = d as PointDatum
+            return new THREE.Mesh(_satGeo, getMat(p.color))
+          }}
+          customThreeObjectUpdate={(obj, d: object) => {
+            const p = d as PointDatum
+            const coords = globeRef.current?.getCoords(p.lat, p.lng, altToVisual(p.alt))
+            if (coords) obj.position.set(coords.x, coords.y, coords.z)
+          }}
+          customLayerLabel={(d: object) => {
+            const p = d as PointDatum
+            return `<div style="font-family:monospace;background:#0f172a;color:#e2e8f0;padding:6px 10px;border-radius:6px;font-size:12px;border:1px solid #334155">
+              <div style="font-weight:bold;color:#38bdf8">${p.name}</div>
+              <div>NORAD: ${p.id}</div>
+              <div>Alt: ${p.alt.toFixed(0)} km</div>
+              <div>Vel: ${p.velocity.toFixed(2)} km/s</div>
+            </div>`
+          }}
+          onCustomLayerClick={(obj: object) => handleCustomClick(obj)}
+          onGlobeReady={buildZones}
+          ringsData={locationRings}
+          ringLat="lat"
+          ringLng="lng"
+          ringColor={() => (t: number) => `rgba(96,165,250,${1 - t})`}
+          ringMaxRadius={4}
+          ringPropagationSpeed={1.5}
+          ringRepeatPeriod={1800}
+          ringAltitude={0.001}
+          width={window.innerWidth}
+          height={window.innerHeight}
+        />
+      </>
     )
   }
 )
