@@ -111,7 +111,11 @@ export function tickPacmanPlayer(
   if (keys.strafeLeft) _move.addScaledVector(actor.frame.east, -1)
   if (_move.lengthSq() > 0) {
     _move.normalize()
-    _axis.copy(_move).cross(actor.position).normalize()
+    // Rotating a point C around axis A moves it in direction A×C. We want
+    // that to equal `_move`, which needs A = C×_move (position×move) — not
+    // move×position. The cross-product order matters: swapped, this rotates
+    // the player in exactly the opposite of the intended direction.
+    _axis.copy(actor.position).cross(_move).normalize()
     const angle = (worldRadius * PLAYER_SPEED_FRAC * dt) / shellRadius
     actor.position.applyAxisAngle(_axis, angle)
     actor.frame.north.applyAxisAngle(_axis, angle)
