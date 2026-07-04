@@ -1,8 +1,15 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { LocateFixed } from 'lucide-react'
 import { GlobeView, ORBITAL_ZONES } from './components/GlobeView'
-import type { GlobeViewHandle } from './components/GlobeView'
+import type { GlobeViewHandle, ScaleMode } from './components/GlobeView'
 import { ZoneLegend } from './components/ZoneLegend'
+import { ScaleToggle } from './components/ScaleToggle'
+import { GameModeToggle } from './components/GameModeToggle'
+import { ShuttleHUD } from './components/ShuttleHUD'
+import type { ShuttleHUDHandle } from './components/ShuttleHUD'
+import { PacmanHUD } from './components/PacmanHUD'
+import type { PacmanHUDHandle } from './components/PacmanHUD'
+import { PacmanStartScreen } from './components/PacmanStartScreen'
 import { InfoPanel } from './components/InfoPanel'
 import { StatsBar } from './components/StatsBar'
 import { SearchBar } from './components/SearchBar'
@@ -15,6 +22,7 @@ import { XRButton } from './components/XRButton'
 import { computeGroundTrack } from './lib/groundTrack'
 import { ALL_CATEGORIES } from './lib/categories'
 import type { SatelliteRecord, SatPosition, ArcSegment, SatCategory } from './types/satellite'
+import type { ShuttleTelemetry, GameOverState, PacmanTelemetry, PacmanGameOverState, GameMode, PacmanScope } from './types/game'
 
 export default function App() {
   const { satellites, loading, error, lastFetch } = useSatellites()
@@ -22,6 +30,19 @@ export default function App() {
   const { location: userLocation } = useUserLocation()
   const { isSupported: xrSupported, isPresenting: xrPresenting, enter: enterXR, exit: exitXR } = useWebXR()
   const globeViewRef = useRef<GlobeViewHandle>(null)
+
+  const [selectedSat, setSelectedSat] = useState<(SatelliteRecord & SatPosition) | null>(null)
+  const [groundTrack, setGroundTrack] = useState<ArcSegment[]>([])
+  const [activeCategories, setActiveCategories] = useState<Set<SatCategory>>(new Set(ALL_CATEGORIES))
+  const [visibleZones, setVisibleZones] = useState<Set<string>>(new Set(ORBITAL_ZONES.map(z => z.name)))
+  const [scaleMode, setScaleMode] = useState<ScaleMode>('compressed')
+  const [gameMode, setGameMode] = useState<GameMode>(null)
+  const [pacmanScope, setPacmanScope] = useState<PacmanScope | null>(null)
+  const [gameOver, setGameOver] = useState<GameOverState | null>(null)
+  const [pacmanGameOver, setPacmanGameOver] = useState<PacmanGameOverState | null>(null)
+  const [restartKey, setRestartKey] = useState(0)
+  const hudRef = useRef<ShuttleHUDHandle>(null)
+  const pacmanHudRef = useRef<PacmanHUDHandle>(null)
 
   // If the XR session ends for any reason (crash, Quest home button, etc.)
   // always call exitXR so the scene is restored. exitXR is idempotent — safe
@@ -34,7 +55,10 @@ export default function App() {
     prevXrPresenting.current = xrPresenting
   }, [xrPresenting])
 
+  // WebXR mode doesn't support the game modes yet — always leave one before
+  // entering the other so their camera takeovers can't collide.
   const handleEnterXR = useCallback(async () => {
+    setGameMode(null)
     const session = await enterXR()
     if (session) {
       await globeViewRef.current?.enterXR(session)
@@ -50,10 +74,49 @@ export default function App() {
     globeViewRef.current?.togglePassthrough()
   }, [])
 
-  const [selectedSat, setSelectedSat] = useState<(SatelliteRecord & SatPosition) | null>(null)
-  const [groundTrack, setGroundTrack] = useState<ArcSegment[]>([])
-  const [activeCategories, setActiveCategories] = useState<Set<SatCategory>>(new Set(ALL_CATEGORIES))
-  const [visibleZones, setVisibleZones] = useState<Set<string>>(new Set(ORBITAL_ZONES.map(z => z.name)))
+  const handleGameModeChange = useCallback((mode: GameMode) => {
+    setGameMode(mode)
+    setGameOver(null)
+    setPacmanGameOver(null)
+    // Always re-prompt for a play area on (re-)entering Pacman rather than
+    // reusing whatever was picked last session.
+    setPacmanScope(null)
+    // True-scale spacing would make the game's play area essentially empty —
+    // force the shared frame the shuttle/pacman/obstacles rely on while playing.
+    if (mode !== null) setScaleMode('compressed')
+  }, [])
+
+  const handleCollision = useCallback((survivedSec: number) => {
+    setGameOver({ survivedSec })
+  }, [])
+
+  const handleTelemetry = useCallback((t: ShuttleTelemetry) => {
+    hudRef.current?.update(t)
+  }, [])
+
+  const handlePacmanTelemetry = useCallback((t: PacmanTelemetry) => {
+    pacmanHudRef.current?.update(t)
+  }, [])
+
+  const handlePacmanGameOver = useCallback((s: PacmanGameOverState) => {
+    setPacmanGameOver(s)
+  }, [])
+
+  const handlePacmanPopup = useCallback((message: string) => {
+    pacmanHudRef.current?.showPopup(message)
+  }, [])
+
+  const handleRestart = useCallback(() => {
+    setGameOver(null)
+    setPacmanGameOver(null)
+    setRestartKey(k => k + 1)
+  }, [])
+
+  const handleExitFromGameOver = useCallback(() => {
+    setGameOver(null)
+    setPacmanGameOver(null)
+    setGameMode(null)
+  }, [])
 
   const toggleZone = useCallback((name: string) => {
     setVisibleZones(prev => {
@@ -106,7 +169,8 @@ export default function App() {
   return (
     <div className={`relative w-screen h-screen ${xrPresenting ? '' : 'overflow-hidden bg-black'}`}>
 
-      {/* Desktop UI — hidden during XR to reduce overlay clutter */}
+      {/* Desktop UI — hidden during XR to reduce overlay clutter (in XR, all
+          controls live in the in-scene 3D menu; see GlobeView/xrMenu) */}
       {!xrPresenting && (
         <>
           <StatsBar
@@ -121,7 +185,21 @@ export default function App() {
             <FilterBar activeCategories={activeCategories} onToggle={toggleCategory} />
           </div>
 
-          <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
+          {gameMode === 'shuttle' && (
+            <ShuttleHUD ref={hudRef} gameOver={gameOver} onRestart={handleRestart} onExit={handleExitFromGameOver} />
+          )}
+          {gameMode === 'pacman' && pacmanScope === null && (
+            <PacmanStartScreen onSelect={setPacmanScope} onExit={handleExitFromGameOver} />
+          )}
+          {gameMode === 'pacman' && pacmanScope !== null && (
+            <PacmanHUD ref={pacmanHudRef} gameOver={pacmanGameOver} onRestart={handleRestart} onExit={handleExitFromGameOver} />
+          )}
+
+          <div className="absolute bottom-6 left-4 z-20 flex flex-col gap-2">
+            {gameMode === null && <ScaleToggle scaleMode={scaleMode} onChange={setScaleMode} />}
+            <ZoneLegend visibleZones={visibleZones} onToggle={toggleZone} />
+            <GameModeToggle mode={gameMode} onChange={handleGameModeChange} />
+          </div>
 
           {userLocation && (
             <button
@@ -145,7 +223,16 @@ export default function App() {
           groundTrack={groundTrack}
           userLocation={userLocation}
           visibleZones={visibleZones}
+          scaleMode={scaleMode}
+          gameMode={gameMode}
+          pacmanScope={pacmanScope}
+          restartKey={restartKey}
           onSelectSat={handleSelectSat}
+          onCollision={handleCollision}
+          onTelemetry={handleTelemetry}
+          onPacmanTelemetry={handlePacmanTelemetry}
+          onPacmanGameOver={handlePacmanGameOver}
+          onPacmanPopup={handlePacmanPopup}
           visibleCount={visibleCount}
           totalCount={satellites.length}
           onToggleCategory={toggleCategory}
@@ -156,16 +243,16 @@ export default function App() {
         />
       </div>
 
-      {/* In XR, all controls live in the 3D scene menu (GlobeView/xrMenu),
-          because Quest does not reliably composite an HTML dom-overlay. */}
-
-      {/* Enter AR button — visible on desktop too when supported */}
-      <XRButton
-        isSupported={xrSupported}
-        isPresenting={xrPresenting}
-        onEnter={handleEnterXR}
-        onExit={handleExitXR}
-      />
+      {/* Enter XR button — hidden during a game mode session since WebXR
+          doesn't support the game modes yet */}
+      {gameMode === null && (
+        <XRButton
+          isSupported={xrSupported}
+          isPresenting={xrPresenting}
+          onEnter={handleEnterXR}
+          onExit={handleExitXR}
+        />
+      )}
 
       {/* Info panel — visible in both modes */}
       {selectedSat && (

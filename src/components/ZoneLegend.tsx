@@ -7,7 +7,7 @@ interface Props {
 
 export function ZoneLegend({ visibleZones, onToggle }: Props) {
   return (
-    <div className="absolute bottom-6 left-4 z-20 flex flex-col gap-1 bg-slate-950/80 backdrop-blur border border-slate-800 rounded-lg px-3 py-2">
+    <div className="flex flex-col gap-1 bg-slate-950/80 backdrop-blur border border-slate-800 rounded-lg px-3 py-2">
       <p className="text-slate-500 text-[10px] uppercase tracking-widest mb-1 font-mono">Orbital Zones</p>
       {ORBITAL_ZONES.map(z => {
         const active = visibleZones.has(z.name)
