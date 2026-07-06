@@ -68,6 +68,9 @@ export class XRMenu {
   private rows: Row[] = []
   private getState: () => XRMenuState
   private cb: XRMenuCallbacks
+  // Rows are rebuilt fresh on every redraw(), so a Row object reference would go
+  // stale immediately — track the hovered button by a structural key instead.
+  private hoveredKey: string | null = null
 
   constructor(getState: () => XRMenuState, cb: XRMenuCallbacks) {
     this.getState = getState
@@ -169,13 +172,17 @@ export class XRMenu {
     const x = PAD_X
     const w = CANVAS_W - PAD_X * 2
     const h = BTN_H - 4
+    const hovered = this.hoveredKey === actionKey(action)
 
-    // Pill background
-    ctx.fillStyle = active ? hexA(color, 0.22) : 'rgba(30,41,59,0.55)'
+    // Pill background — hover gets a visible lift so the user can see which
+    // button the ray/pinch is over *before* committing to the pinch, since
+    // there's no cursor otherwise (that gap is what made the menu feel like it
+    // only worked when physically touched: no feedback to aim by at range).
+    ctx.fillStyle = active ? hexA(color, 0.22) : hovered ? 'rgba(51,65,85,0.8)' : 'rgba(30,41,59,0.55)'
     roundRect(ctx, x, y, w, h, 14)
     ctx.fill()
-    ctx.lineWidth = 2
-    ctx.strokeStyle = active ? hexA(color, 0.85) : (danger ? hexA(color, 0.5) : 'rgba(71,85,105,0.5)')
+    ctx.lineWidth = hovered ? 3 : 2
+    ctx.strokeStyle = active ? hexA(color, 0.85) : hovered ? 'rgba(226,232,240,0.9)' : (danger ? hexA(color, 0.5) : 'rgba(71,85,105,0.5)')
     roundRect(ctx, x, y, w, h, 14)
     ctx.stroke()
 
@@ -233,6 +240,31 @@ export class XRMenu {
     return this.fireAtUV(hits[0].uv.x, hits[0].uv.y)
   }
 
+  /**
+   * Call every frame with the controller ray to keep the hover highlight in
+   * sync (only actually redraws the canvas — and re-uploads the texture — when
+   * the hovered button changes, not every frame). Returns the intersection
+   * distance so the caller can also use it to terminate the ray's visual at
+   * the panel surface, or null if the ray misses the panel.
+   */
+  updateHoverFromRay(raycaster: THREE.Raycaster): number | null {
+    const hits = raycaster.intersectObject(this.mesh, false)
+    if (hits.length === 0 || !hits[0].uv) {
+      this.setHover(null)
+      return null
+    }
+    const canvasY = (1 - hits[0].uv.y) * CANVAS_H
+    const row = this.rows.find(r => r.action && canvasY >= r.y0 && canvasY <= r.y1)
+    this.setHover(row?.action ? actionKey(row.action) : null)
+    return hits[0].distance
+  }
+
+  private setHover(key: string | null) {
+    if (key === this.hoveredKey) return
+    this.hoveredKey = key
+    this.redraw()
+  }
+
   /** Hand pinch-poke interaction: is the world point on/near the panel surface? */
   private _local = new THREE.Vector3()
   hitFromPoint(worldPoint: THREE.Vector3): boolean {
@@ -253,6 +285,14 @@ export class XRMenu {
     this.mesh.geometry.dispose()
     ;(this.mesh.material as THREE.Material).dispose()
     this.texture.dispose()
+  }
+}
+
+function actionKey(a: HitAction): string {
+  switch (a.kind) {
+    case 'category': return `category:${a.id}`
+    case 'zone':      return `zone:${a.id}`
+    default:          return a.kind
   }
 }
 

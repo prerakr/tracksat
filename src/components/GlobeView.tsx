@@ -133,12 +133,14 @@ const GAME_CHASE_HEIGHT = 3
 // surface) — the game camera never leaves this full-globe framing.
 const PACMAN_CAM_ALTITUDE = 2.5
 
-// XR pointer ray (3 m, in unscaled rig space) + move handle
+// XR pointer ray (in unscaled rig space) + move handle + ray hit-point marker
+const RAY_LEN = 3 // m — default/max length when nothing is under the ray
 const _rayGeo = new THREE.BufferGeometry().setFromPoints([
   new THREE.Vector3(0, 0, 0),
-  new THREE.Vector3(0, 0, -3),
+  new THREE.Vector3(0, 0, -RAY_LEN),
 ])
 const _handleGeo = new THREE.SphereGeometry(0.045, 20, 14)  // 4.5 cm grab handle
+const _pointerGeo = new THREE.SphereGeometry(0.008, 12, 8)  // ray hit-point marker
 
 // XR scale constants
 const XR_SCALE     = 0.003   // 0.3 m radius → 60 cm diameter globe
@@ -147,6 +149,10 @@ const XR_DEPTH     = -0.7    // m in front of user
 const XR_INERTIA   = 0.92    // per-frame rotation decay after release
 const SAT_PICK_RAD = 0.06    // rad (~3.4°) angular tolerance for ray satellite picking
 const TAP_MAX_TURN = 0.10    // rad of accumulated rotation under which a grab counts as a tap
+// Quest's GPU is fill-rate limited under stereo; these trade a little visual
+// sharpness for materially smoother frame pacing.
+const XR_FOVEATION       = 1    // 0 (off) – 1 (max fixed foveated rendering)
+const XR_FRAMEBUFFER_SCALE = 0.8
 
 export const ORBITAL_ZONES = [
   { name: 'LEO', altKm: 2_000,  color: '#60a5fa', label: '160 – 2,000 km' },
@@ -169,13 +175,37 @@ function makeGrab(): Grab {
 }
 
 const _v = new THREE.Vector3()
-function ctrlWorldPos(ctrl: THREE.Object3D): THREE.Vector3 {
-  return new THREE.Vector3().setFromMatrixPosition(ctrl.matrixWorld)
+// Reused across onSelectStart/the per-frame render loop — both run synchronously
+// on the main thread and never hold onto the result past their own scope, so a
+// shared scratch vector avoids a `new THREE.Vector3()` allocation every frame
+// (each grab was allocating 1–4 of these per frame, enough GC churn on Quest's
+// GPU/CPU-shared memory to show up as stutter).
+const _cp = new THREE.Vector3()
+const _p0 = new THREE.Vector3()
+const _p1 = new THREE.Vector3()
+const _oc = new THREE.Vector3()
+function ctrlWorldPos(ctrl: THREE.Object3D, out: THREE.Vector3): THREE.Vector3 {
+  return out.setFromMatrixPosition(ctrl.matrixWorld)
 }
 // Aim a raycaster down the controller's −Z (the XR target ray).
 function rayFromController(ctrl: THREE.Object3D, rc: THREE.Raycaster) {
   rc.ray.origin.setFromMatrixPosition(ctrl.matrixWorld)
   rc.ray.direction.set(0, 0, -1).transformDirection(ctrl.matrixWorld)
+}
+// Nearest positive intersection distance of a ray with a sphere, or null if it misses.
+function raySphereDistance(
+  origin: THREE.Vector3, dir: THREE.Vector3, center: THREE.Vector3, radius: number,
+): number | null {
+  _oc.copy(origin).sub(center)
+  const b = _oc.dot(dir)
+  const c = _oc.lengthSq() - radius * radius
+  const disc = b * b - c
+  if (disc < 0) return null
+  const sqrtDisc = Math.sqrt(disc)
+  const t0 = -b - sqrtDisc
+  if (t0 > 0.001) return t0
+  const t1 = -b + sqrtDisc
+  return t1 > 0.001 ? t1 : null
 }
 
 const SKY_URL = '//unpkg.com/three-globe/example/img/night-sky.png'
@@ -263,6 +293,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
       rig: null as THREE.Scene | null,
       controllers: [] as THREE.XRTargetRaySpace[],
       rays: [] as THREE.Line[],
+      pointers: [] as THREE.Mesh[],
       moveHandle: null as THREE.Mesh | null,
       raycaster: new THREE.Raycaster(),
       // 3D in-scene menu (Quest dom-overlay is unreliable, so UI lives in the scene)
@@ -324,10 +355,19 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
           const ray = new THREE.Line(_rayGeo, new THREE.LineBasicMaterial({
             color: 0xffffff, transparent: true, opacity: 0.6,
           }))
+          // Hit-point marker, positioned in the per-frame loop wherever the ray
+          // currently terminates (menu / handle / globe surface) — local child of
+          // the controller, so its position is just (0, 0, -hitDistance).
+          const pointer = new THREE.Mesh(_pointerGeo, new THREE.MeshBasicMaterial({
+            color: 0xffffff, transparent: true, opacity: 0.9, depthTest: false,
+          }))
+          pointer.renderOrder = 998
           ctrl.add(ray)
+          ctrl.add(pointer)
           rig.add(ctrl)
           state.controllers.push(ctrl)
           state.rays.push(ray)
+          state.pointers.push(pointer)
         }
 
         // Grab handle that follows the globe; pinch/grip it to reposition the globe.
@@ -387,14 +427,14 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
           // 2. Move handle → drag the globe
           if (rc.intersectObject(handle, false).length > 0) {
             grab.active = true; grab.mode = 'move'
-            grab.offset.copy(scene.position).sub(ctrlWorldPos(ctrl))
+            grab.offset.copy(scene.position).sub(ctrlWorldPos(ctrl, _cp))
             return
           }
 
           // 3. Otherwise grab the globe: rotate on drag, or tap to select a satellite
           grab.active = true; grab.mode = 'globe'; grab.turned = 0
           grab.sat = softPickSat()
-          const cp = ctrlWorldPos(ctrl)
+          const cp = ctrlWorldPos(ctrl, _cp)
           grab.startAngle = Math.atan2(cp.x - scene.position.x, cp.z - scene.position.z)
         }
 
@@ -415,6 +455,13 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
 
         globe.pauseAnimation()
         renderer.xr.enabled = true
+        // Fixed foveated rendering + a slightly reduced render-target resolution —
+        // both must be set before setSession. Quest's GPU is fill-rate limited
+        // under stereo, so this buys back frame time at a small, mostly-peripheral
+        // sharpness cost. Wrapped defensively since not every WebXR runtime
+        // implements both (older browsers, non-Quest headsets).
+        try { renderer.xr.setFoveation(XR_FOVEATION) } catch { /* unsupported */ }
+        try { renderer.xr.setFramebufferScaleFactor(XR_FRAMEBUFFER_SCALE) } catch { /* unsupported */ }
         // Connect to the XR session FIRST so the first renderer.render() call
         // inside the loop already targets the XR framebuffer, not the canvas.
         await renderer.xr.setSession(session)
@@ -440,13 +487,35 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
             )
             handle.scale.setScalar(Math.max(0.6, Math.min(2.2, worldRadius / 0.3)))
 
+            // Ray termination: shorten each controller's ray (and place its hit-point
+            // marker) at the nearest of the menu, the move handle, or the globe surface,
+            // instead of always drawing a fixed-length ray straight through everything.
+            // Also drives the menu's hover highlight so a button lights up before the
+            // user pinches — the button hit-test itself was already correct, but with
+            // no feedback about where the ray was actually landing, aiming it from a
+            // distance was guesswork (which reads as "you have to reach out and touch
+            // it" — the hand only agrees with the ray once it's right on top of the menu).
+            for (let ci = 0; ci < 2; ci++) {
+              const ctrl = state.controllers[ci]
+              rayFromController(ctrl, rc)
+              let hitDist = RAY_LEN
+              const menuDist = state.menu?.updateHoverFromRay(rc) ?? null
+              if (menuDist !== null && menuDist < hitDist) hitDist = menuDist
+              const handleHits = rc.intersectObject(handle, false)
+              if (handleHits.length > 0 && handleHits[0].distance < hitDist) hitDist = handleHits[0].distance
+              const globeDist = raySphereDistance(rc.ray.origin, rc.ray.direction, scene.position, worldRadius)
+              if (globeDist !== null && globeDist < hitDist) hitDist = globeDist
+              state.rays[ci].scale.z = hitDist / RAY_LEN
+              state.pointers[ci].position.set(0, 0, -hitDist)
+            }
+
             const t0 = g0.active && (g0.mode === 'globe' || g0.mode === 'move')
             const t1 = g1.active && (g1.mode === 'globe' || g1.mode === 'move')
 
             if (t0 && t1) {
               // Two-handed: scale by the change in controller separation, and
               // translate by the shift of their midpoint.
-              const p0 = ctrlWorldPos(c0), p1 = ctrlWorldPos(c1)
+              const p0 = ctrlWorldPos(c0, _p0), p1 = ctrlWorldPos(c1, _p1)
               const dist = p0.distanceTo(p1)
               const midX = (p0.x + p1.x) * 0.5, midY = (p0.y + p1.y) * 0.5, midZ = (p0.z + p1.z) * 0.5
               if (!state.twoHandActive) {
@@ -468,7 +537,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
               const i = t0 ? 0 : t1 ? 1 : -1
               if (i >= 0) {
                 const ctrl = state.controllers[i], grab = state.grabs[i]
-                const cp = ctrlWorldPos(ctrl)
+                const cp = ctrlWorldPos(ctrl, _cp)
                 if (grab.mode === 'move') {
                   scene.position.copy(cp).add(grab.offset)
                 } else {
@@ -513,10 +582,11 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
 
         renderer.setAnimationLoop(null)
 
-        // Tear down the XR rig (controllers, rays, handle, menu)
+        // Tear down the XR rig (controllers, rays, pointers, handle, menu)
         const rig = state.rig
         if (rig) {
           for (const ray of state.rays) (ray.material as THREE.Material).dispose()
+          for (const pointer of state.pointers) (pointer.material as THREE.Material).dispose()
           for (const ctrl of state.controllers) rig.remove(ctrl)
           state.menu?.dispose()
           if (state.moveHandle) {
@@ -526,6 +596,7 @@ export const GlobeView = forwardRef<GlobeViewHandle, Props>(
         }
         state.controllers = []
         state.rays = []
+        state.pointers = []
         state.moveHandle = null
         state.menu = null
         state.rig = null
